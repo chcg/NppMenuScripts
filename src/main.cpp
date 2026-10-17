@@ -14,28 +14,31 @@
 #include <cctype>
 #include <functional>
 #include <cstring>
+#include <climits>
 #include <cwchar>
 #include <utility>
+#include <unordered_map>
 #include <commdlg.h>
 #include <shellapi.h>
 #include <shlobj.h>
 
-#ifndef NPPNODEJS_DEBUG_DEFAULT
-#define NPPNODEJS_DEBUG_DEFAULT 0
+#ifndef NPPMENUSCRIPTS_DEBUG_DEFAULT
+#define NPPMENUSCRIPTS_DEBUG_DEFAULT 0
 #endif
 
 #include "PluginInterface.h"
 #include "Notepad_plus_msgs.h"
 #include "Docking.h"
+#include "version.h"
 extern "C" {
 #include "../third_party/cJSON.h"
 }
 
-static const wchar_t PLUGIN_NAME[] = L"NppNodeJS";
+static const wchar_t PLUGIN_NAME[] = L"NppMenuScripts";
 // Keep this synchronized with menu-helper.js. Change it only when helper API
 // compatibility changes, not for routine implementation fixes.
-static constexpr unsigned int HELPER_API_ID = 1;
-static constexpr char HELPER_API_CHECK_PREFIX[] = "\x1eNPPNODE_HELPER_API:";
+static constexpr unsigned int HELPER_API_ID = 9;
+static constexpr char HELPER_API_CHECK_PREFIX[] = "\x1eNPPMENUSCRIPTS_HELPER_API:";
 static NppData g_nppData{};
 static HMODULE g_hModule = nullptr;
 
@@ -46,14 +49,32 @@ static void rebuildMenu();
 static void setMenuJsonPath();
 static bool installMenus(const std::wstring& jsonPath, bool forceRebuild = false);
 static void removeMenus();
+static void runToolbarScript(size_t index);
+static bool setNppStatusText(const std::wstring& text);
+static void loadTranslations();
+static const std::wstring& tr(const char* key);
+static void applyTranslatedPluginMenu();
+static LRESULT CALLBACK pluginMenuMessageHook(int code, WPARAM wParam, LPARAM lParam);
+static void installPluginMenuMessageHook();
+static void removePluginMenuMessageHook();
+static std::unordered_map<std::string, std::wstring> g_translations;
+static void debugLog(const std::wstring& message);
+static std::wstring joinPath(std::wstring base, std::wstring relative);
 static FuncItem g_funcItems[] = {
     { L"Open Scripts Folder", openScriptsFolder, 0, false, nullptr },
     { L"Open menu.json", openMenuJson, 0, false, nullptr },
-    { L"Rebuild Menu", rebuildMenu, 0, false, nullptr },
+    { L"Rebuild Menu && Toolbar", rebuildMenu, 0, false, nullptr },
     { L"Set menu.json Path...", setMenuJsonPath, 0, false, nullptr },
     { L"", nullptr, 0, false, nullptr },
-    { L"About NppNodeJS (v1.0.1)", showAbout, 0, false, nullptr }
+    { L"", showAbout, 0, false, nullptr }
 };
+static std::vector<FuncItem> g_allFuncItems;
+static std::vector<std::wstring> g_toolbarScriptFiles;
+static std::vector<std::wstring> g_toolbarIconFiles;
+static std::vector<std::wstring> g_toolbarTitles;
+static std::vector<toolbarIconsWithDarkMode> g_toolbarIcons;
+static bool g_toolbarIconsRegistered = false;
+static int g_menuScriptCount = 0;
 
 static HMENU g_mainMenu = nullptr;
 static std::vector<HMENU> g_topMenus;
@@ -64,40 +85,47 @@ static std::vector<std::wstring> g_scriptPaths;
 static std::vector<std::wstring> g_scriptTitles;
 static bool g_installed = false;
 static HWND g_hotkeyWnd = nullptr;
-static const wchar_t HOTKEY_CLASS_NAME[] = L"NppNodeJS_HotkeyWindow";
+static const wchar_t HOTKEY_CLASS_NAME[] = L"NppMenuScripts_HotkeyWindow";
 
 static HWND g_outputPane = nullptr;
 static HWND g_outputEdit = nullptr;
 static COLORREF g_outputFore = RGB(0, 0, 0);
 static COLORREF g_outputBack = RGB(255, 255, 255);
+static int g_outputCaretStyle = 1;
+static bool g_outputCaretStyleCaptured = false;
 static int g_outputTechnology = 0;
 static int g_outputBorderWidth = 0;
-static const wchar_t OUTPUT_CLASS_NAME[] = L"NppNodeJS_OutputPane";
-static std::wstring g_outputTitle = L"NppNodeJS Output";
+static const wchar_t OUTPUT_CLASS_NAME[] = L"NppMenuScripts_OutputPane";
+static std::wstring g_outputTitle = L"Output Pane";
+static std::wstring g_outputDefaultTitle = L"Output Pane";
+static int g_stdoutAnsiColor = -1;
+static int g_stderrAnsiColor = -1;
 static std::wstring g_scriptFolder;
 static std::wstring g_debugLogPath;
-static bool g_debugEnabled = (NPPNODEJS_DEBUG_DEFAULT != 0);
+static bool g_debugEnabled = (NPPMENUSCRIPTS_DEBUG_DEFAULT != 0);
 static std::wstring g_menuJsonPath;
 static const int OUTPUT_DLG_ID = 0x4E4A;
 static DockedWidgetData g_outputDock{};
 static bool g_outputShownForRun = false;
-static bool g_outputRunningTitle = false;
-static bool g_outputFinishPending = false;
-static wchar_t g_outputAddInfo[64] = {};
-static std::atomic<int> g_outputMessagesPending{0};
 static std::mutex g_processMutex;
 static std::thread g_processThread;
 static HANDLE g_stdinWrite = nullptr;
 static std::mutex g_stdinMutex;
 static std::atomic<bool> g_processRunning{false};
+static std::atomic<bool> g_scriptSetStatusBarText{false};
+static std::atomic<bool> g_scriptSetCursor{false};
 static std::atomic<bool> g_shuttingDown{false};
 static std::atomic<bool> g_helperApiVerified{false};
 static std::atomic<bool> g_helperApiMismatchReported{false};
 static std::mutex g_processHandleMutex;
 static HANDLE g_processHandle = nullptr;
-static constexpr UINT WM_NPPNODE_OUTPUT = WM_APP + 101;
-static constexpr UINT WM_NPPNODE_RUNSTATE = WM_APP + 102;
-static constexpr UINT WM_NPPNODE_PROTOCOL = WM_APP + 103;
+static constexpr UINT WM_NPPMENUSCRIPTS_OUTPUT = WM_APP + 101;
+static constexpr UINT WM_NPPMENUSCRIPTS_RUNSTATE = WM_APP + 102;
+static constexpr UINT WM_NPPMENUSCRIPTS_PROTOCOL = WM_APP + 103;
+static constexpr UINT WM_NPPMENUSCRIPTS_REFRESH_LANGUAGE = WM_APP + 104;
+static constexpr UINT_PTR NPPMENUSCRIPTS_LANGUAGE_TIMER = 0x4E4C;
+static unsigned int g_languageRefreshPasses = 0;
+static HHOOK g_pluginMenuMessageHook = nullptr;
 
 struct ProtocolDispatchRequest {
     std::string line;
@@ -105,6 +133,11 @@ struct ProtocolDispatchRequest {
     std::mutex mutex;
     std::condition_variable cv;
     bool done = false;
+};
+
+struct RunStatePayload {
+    std::wstring text;
+    bool restoreEditorFocus = false;
 };
 
 static LRESULT CALLBACK hotkeyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -115,24 +148,40 @@ static bool createOutputPane();
 static void destroyOutputPane();
 static void showOutputPane();
 static HWND currentScintilla();
+static bool hasScriptExtension(const std::wstring& path);
+static bool isCurrentFileToken(const std::wstring& value);
+static std::wstring scriptExtension(const std::wstring& path);
 
 static constexpr UINT NPPM_GETFULLPATHFROMBUFFERID_LOCAL = NPPMSG + 58;
+static constexpr UINT NPPM_GETPOSFROMBUFFERID_LOCAL = NPPMSG + 57;
 static constexpr UINT NPPM_GETCURRENTBUFFERID_LOCAL = NPPMSG + 60;
+static constexpr UINT NPPM_ACTIVATEDOC_LOCAL = NPPMSG + 28;
+static constexpr UINT NPPM_GETCURRENTVIEW_LOCAL = NPPMSG + 88;
 
 static constexpr UINT SCI_GETCURRENTPOS_LOCAL = 2008;
+static constexpr UINT SCI_GETFIRSTVISIBLELINE_LOCAL = 2152;
+static constexpr UINT SCI_DOCLINEFROMVISIBLE_LOCAL = 2221;
+static constexpr UINT SCI_GETLINEVISIBLE_LOCAL = 2228;
+static constexpr UINT SCI_ENSUREVISIBLE_LOCAL = 2232;
+static constexpr UINT SCI_GOTOPOS_LOCAL = 2025;
 static constexpr UINT SCI_LINEFROMPOSITION_LOCAL = 2166;
 static constexpr UINT SCI_GETCOLUMN_LOCAL = 2129;
+static constexpr UINT SCI_GETLINECOUNT_LOCAL = 2154;
 static constexpr UINT SCI_GETLINE_LOCAL = 2153;
 static constexpr UINT SCI_GETSELTEXT_LOCAL = 2161;
 static constexpr UINT SCI_REPLACESEL_LOCAL = 2170;
 static constexpr UINT SCI_GETTEXT_LOCAL = 2182;
 static constexpr UINT SCI_GETTEXTLENGTH_LOCAL = 2183;
 static constexpr UINT SCI_POSITIONFROMLINE_LOCAL = 2167;
+static constexpr UINT SCI_FINDCOLUMN_LOCAL = 2456;
+static constexpr UINT SCI_VISIBLEFROMDOCLINE_LOCAL = 2220;
+static constexpr UINT SCI_SETFIRSTVISIBLELINE_LOCAL = 2613;
 static constexpr UINT SCI_GETLINEENDPOSITION_LOCAL = 2136;
 static constexpr UINT SCI_LINELENGTH_LOCAL = 2350;
 static constexpr UINT SCI_GETSELECTIONSTART_LOCAL = 2143;
 static constexpr UINT SCI_GETSELECTIONEND_LOCAL = 2145;
 static constexpr UINT SCI_SETSEL_LOCAL = 2160;
+static constexpr UINT SCI_GETMODIFY_LOCAL = 2159;
 
 static std::wstring utf8ToWide(const char* s)
 {
@@ -165,6 +214,238 @@ static std::wstring moduleDirectory()
     std::wstring s(path, n);
     const size_t p = s.find_last_of(L"\\/");
     return p == std::wstring::npos ? L"." : s.substr(0, p);
+}
+
+static const std::wstring& tr(const char* key)
+{
+    static const std::wstring empty;
+    static const std::unordered_map<std::string, std::wstring> builtInEnglish = {
+        {"OutputPane", L"Output Pane"}, {"OpenScriptsFolder", L"Open Scripts Folder"},
+        {"OpenMenuJson", L"Open menu.json"}, {"RebuildMenuToolbar", L"Rebuild Menu && Toolbar"},
+        {"SetMenuJsonPath", L"Set menu.json Path..."}, {"About", L"About NppMenuScripts (v{version})"},
+        {"Toolbar", L"Toolbar"}, {"ScriptRunning", L"Running - {name}"},
+        {"ScriptCompleted", L"Script completed"}, {"ScriptFailed", L"Script failed"},
+        {"UsingMenuJson", L"Using: {path}"}, {"MenuRebuilt", L"Rebuilt: {path}"},
+        {"PleaseWaitSetPath", L"Please wait until the current script has finished before changing the menu configuration file."},
+        {"PleaseWait", L"Please wait until the current script has finished."},
+        {"PleaseWaitRebuild", L"Please wait until the current script has finished before rebuilding the menu."},
+        {"ScriptsFolderMissing", L"The scripts folder does not exist. Create it?"},
+        {"CreateScriptsFolderFailed", L"Unable to create the scripts folder."},
+        {"OpenScriptsFolderFailed", L"Unable to open the scripts folder."},
+        {"MenuJsonMissing", L"The current menu.json file does not exist."},
+        {"OpenGithubFailed", L"Unable to open the NppMenuScripts GitHub page."},
+        {"MenuPathSaveFailed", L"The menu configuration was changed, but NppMenuScripts could not save the new path.\r\n\r\nThe new path will remain active until Notepad++ is restarted."},
+        {"ScriptAlreadyRunning", L"A script is already running."},
+        {"HelperIncompatible", L"The NppMenuScripts helper module is incompatible with the loaded NppMenuScripts.dll.\r\n\r\nCopy the matching helper module next to NppMenuScripts.dll or into the parent directory of script_folder, then run the script again."},
+        {"CreateScriptPrompt", L"{name} does not exist. Create it?"},
+        {"CreateScriptFailed", L"Unable to create the script file."},
+        {"CurrentFileUnnamed", L"Save the current file before running it."},
+        {"CurrentFileUnsupported", L"Unsupported current file type: {extension}. Supported types are .js, .mjs, .pl, and .py."},
+        {"CurrentFileModified", L"The current file has unsaved changes. Save it before running?"},
+        {"CurrentFileSaveFailed", L"The current file could not be saved. The script was not run."},
+        {"MenuJsonEmpty", L"menu.json was not found or is empty."},
+        {"JsonParseError", L"JSON parse error: {error}"},
+        {"InvalidMenuJson", L"menu.json must contain string 'script_folder' and object 'menu'. Menu items must be {title, script}, {title, sub}, or an empty object for a separator. Optional 'icon_folder' must be a string and optional 'toolbar' must be an array."},
+        {"InvalidToolbarEntry", L"Each 'toolbar' entry must be an object with string 'icon', 'script', and 'title' properties. 'script' must be a .js, .mjs, .pl, or .py file."},
+        {"InvalidToolbarIcon", L"Toolbar icons must use the .ico format."},
+        {"ToolbarLimit", L"A maximum of 32 toolbar scripts is supported."},
+        {"AllocateMenuIdsFailed", L"Notepad++ could not allocate menu command IDs."},
+        {"HotkeyWindowFailed", L"Cannot create hotkey window."},
+        {"MainMenuFailed", L"Cannot get Notepad++ main menu."},
+        {"UnableCreatePipes", L"[NppMenuScripts] Unable to create stdout/stderr pipes.\r\n"},
+        {"UnableStartNode", L"[NppMenuScripts] Unable to start node.exe. Error code: {error}\r\n"},
+        {"UnableStartPerl", L"[NppMenuScripts] Unable to start perl.exe. Error code: {error}\r\n"},
+        {"UnableStartPython", L"[NppMenuScripts] Unable to start py.exe. Error code: {error}\r\n"},
+        {"SelectMenuJson", L"Select NppMenuScripts menu.json"},
+        {"JsonFiles", L"JSON files (*.json)"}, {"AllFiles", L"All files (*.*)"}
+    };
+    const auto it = g_translations.find(key);
+    if (it != g_translations.end()) return it->second;
+    const auto fallback = builtInEnglish.find(key);
+    return fallback == builtInEnglish.end() ? empty : fallback->second;
+}
+
+static std::wstring trFormat(const char* key, const std::vector<std::pair<std::wstring, std::wstring>>& values)
+{
+    std::wstring result = tr(key);
+    for (const auto& value : values) {
+        size_t at = 0;
+        while ((at = result.find(value.first, at)) != std::wstring::npos) {
+            result.replace(at, value.first.size(), value.second);
+            at += value.second.size();
+        }
+    }
+    return result;
+}
+
+static std::wstring nativeLocaleCode()
+{
+    const LRESULT needed = SendMessageW(g_nppData._nppHandle, NPPM_GETNATIVELANGFILENAME, 0, 0);
+    if (needed <= 0 || needed > 1024) {
+        debugLog(L"NPPM_GETNATIVELANGFILENAME returned length=" + std::to_wstring(needed));
+        return L"";
+    }
+    std::vector<char> filename(static_cast<size_t>(needed) + 1, '\0');
+    const LRESULT copied = SendMessageW(g_nppData._nppHandle, NPPM_GETNATIVELANGFILENAME,
+                                        static_cast<WPARAM>(filename.size()),
+                                        reinterpret_cast<LPARAM>(filename.data()));
+    if (copied <= 0) {
+        debugLog(L"NPPM_GETNATIVELANGFILENAME copy returned length=" + std::to_wstring(copied));
+        return L"";
+    }
+    debugLog(L"Native language filename='" + utf8ToWide(filename.data()) + L"'");
+    std::string name(filename.data(), static_cast<size_t>(copied));
+    const size_t separator = name.find_last_of("/\\");
+    if (separator != std::string::npos) name = name.substr(separator + 1);
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const size_t dot = name.find_last_of('.');
+    if (dot != std::string::npos) name.resize(dot);
+    if (name == "taiwanesemandarin" || name == "chinese") return L"zh-TW";
+    if (name == "chinesesimplified") return L"zh-CN";
+    if (name == "japanese") return L"ja";
+    if (name == "french") return L"fr";
+    if (name == "spanish") return L"es";
+    if (name == "portuguese") return L"pt-PT";
+    if (name == "brazilian_portuguese" || name == "brazilianportuguese") return L"pt-BR";
+    return L"en";
+}
+
+static void loadTranslations()
+{
+    const std::wstring path = joinPath(moduleDirectory(), L"i18n.json");
+    std::ifstream file(path.c_str(), std::ios::binary);
+    std::string bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    if (bytes.size() >= 3 && static_cast<unsigned char>(bytes[0]) == 0xEF &&
+        static_cast<unsigned char>(bytes[1]) == 0xBB && static_cast<unsigned char>(bytes[2]) == 0xBF) bytes.erase(0, 3);
+    cJSON* root = bytes.empty() ? nullptr : cJSON_Parse(bytes.c_str());
+    if (!cJSON_IsObject(root)) {
+        debugLog(L"i18n.json missing or invalid; using built-in English strings");
+        if (root) cJSON_Delete(root);
+        return;
+    }
+    const std::wstring locale = nativeLocaleCode();
+    if (locale.empty() && !g_translations.empty()) {
+        debugLog(L"Native UI locale is temporarily unavailable; retaining current translations");
+        cJSON_Delete(root);
+        return;
+    }
+    g_translations.clear();
+    const std::wstring effectiveLocale = locale.empty() ? L"en" : locale;
+    const std::string localeUtf8 = effectiveLocale == L"zh-TW" ? "zh-TW" : effectiveLocale == L"zh-CN" ? "zh-CN" :
+                                   effectiveLocale == L"pt-PT" ? "pt-PT" : effectiveLocale == L"pt-BR" ? "pt-BR" :
+                                   effectiveLocale == L"ja" ? "ja" : effectiveLocale == L"fr" ? "fr" : effectiveLocale == L"es" ? "es" : "en";
+    cJSON* english = cJSON_GetObjectItemCaseSensitive(root, "en");
+    cJSON* selected = cJSON_GetObjectItemCaseSensitive(root, localeUtf8.c_str());
+    for (cJSON* item = english ? english->child : nullptr; item; item = item->next) {
+        if (item->string && cJSON_IsString(item) && item->valuestring[0]) g_translations[item->string] = utf8ToWide(item->valuestring);
+    }
+    if (selected && selected != english) {
+        for (cJSON* item = selected->child; item; item = item->next) {
+            if (item->string && cJSON_IsString(item) && item->valuestring[0]) g_translations[item->string] = utf8ToWide(item->valuestring);
+        }
+    }
+    debugLog(L"Native UI locale=" + effectiveLocale + L" translation entries=" + std::to_wstring(g_translations.size()));
+    cJSON_Delete(root);
+}
+
+static bool setMenuLabelByCommand(HMENU menu, UINT commandId, const wchar_t* label)
+{
+    if (!menu || !label) return false;
+    MENUITEMINFOW info{};
+    info.cbSize = sizeof(info);
+    info.fMask = MIIM_STRING;
+    info.dwTypeData = const_cast<wchar_t*>(label);
+    return SetMenuItemInfoW(menu, commandId, FALSE, &info) != FALSE;
+}
+
+static void applyTranslatedPluginMenu()
+{
+    const char* keys[] = { "OpenScriptsFolder", "OpenMenuJson", "RebuildMenuToolbar", "SetMenuJsonPath", "", "About" };
+    for (size_t i = 0; i < std::size(keys); ++i) {
+        if (!keys[i][0]) continue;
+        std::wstring label = tr(keys[i]);
+        if (i == 5) {
+            const std::wstring version = std::to_wstring(NPP_MENUSCRIPTS_VERSION_MAJOR) + L"." +
+                std::to_wstring(NPP_MENUSCRIPTS_VERSION_MINOR) + L"." + std::to_wstring(NPP_MENUSCRIPTS_VERSION_PATCH) + L"." +
+                std::to_wstring(NPP_MENUSCRIPTS_VERSION_BUILD);
+            label = trFormat("About", {{L"{version}", version}});
+        }
+        if (label.empty()) continue;
+        wcsncpy_s(g_funcItems[i]._itemName, label.c_str(), _TRUNCATE);
+        if (i < g_allFuncItems.size()) wcsncpy_s(g_allFuncItems[i]._itemName, label.c_str(), _TRUNCATE);
+    }
+
+    HMENU pluginsMenu = reinterpret_cast<HMENU>(SendMessageW(g_nppData._nppHandle, NPPM_GETMENUHANDLE, NPPPLUGINMENU, 0));
+    HMENU pluginMenu = nullptr;
+    for (int i = 0; pluginsMenu && i < GetMenuItemCount(pluginsMenu); ++i) {
+        wchar_t label[128] = {};
+        GetMenuStringW(pluginsMenu, static_cast<UINT>(i), label, static_cast<int>(std::size(label)), MF_BYPOSITION);
+        std::wstring normalized = label;
+        normalized.erase(std::remove(normalized.begin(), normalized.end(), L'&'), normalized.end());
+        if (normalized == PLUGIN_NAME) {
+            MENUITEMINFOW info{}; info.cbSize = sizeof(info); info.fMask = MIIM_SUBMENU;
+            if (GetMenuItemInfoW(pluginsMenu, static_cast<UINT>(i), TRUE, &info)) pluginMenu = info.hSubMenu;
+            break;
+        }
+    }
+    if (!pluginMenu) {
+        debugLog(L"Translated plugin menu not found for '" + std::wstring(PLUGIN_NAME) + L"'");
+        return;
+    }
+    for (size_t i = 0; i < std::size(g_funcItems) && i < g_allFuncItems.size(); ++i) {
+        const bool updated = setMenuLabelByCommand(pluginMenu, static_cast<UINT>(g_allFuncItems[i]._cmdID), g_funcItems[i]._itemName);
+        debugLog(L"Translated plugin menu command id=" + std::to_wstring(g_allFuncItems[i]._cmdID) +
+                 L" label='" + g_funcItems[i]._itemName + L"' updated=" + std::to_wstring(updated));
+    }
+    if (g_allFuncItems.size() > std::size(g_funcItems)) {
+        const std::wstring toolbarLabel = tr("Toolbar");
+        for (int i = 0; i < GetMenuItemCount(pluginMenu); ++i) {
+            MENUITEMINFOW info{}; info.cbSize = sizeof(info); info.fMask = MIIM_SUBMENU | MIIM_STRING;
+            wchar_t label[128] = {}; info.dwTypeData = label; info.cch = static_cast<UINT>(std::size(label));
+            if (GetMenuItemInfoW(pluginMenu, static_cast<UINT>(i), TRUE, &info) && info.hSubMenu) {
+                const bool isToolbar = std::wstring(label) == L"Toolbar" || (!toolbarLabel.empty() && std::wstring(label) == toolbarLabel);
+                if (isToolbar && !toolbarLabel.empty()) {
+                    info.fMask = MIIM_STRING; info.dwTypeData = const_cast<wchar_t*>(toolbarLabel.c_str());
+                    SetMenuItemInfoW(pluginMenu, static_cast<UINT>(i), TRUE, &info);
+                    break;
+                }
+            }
+        }
+    }
+    DrawMenuBar(g_nppData._nppHandle);
+}
+
+static LRESULT CALLBACK pluginMenuMessageHook(int code, WPARAM wParam, LPARAM lParam)
+{
+    if (code >= 0 && lParam) {
+        const auto* message = reinterpret_cast<const CWPSTRUCT*>(lParam);
+        if (message->message == WM_INITMENU || message->message == WM_INITMENUPOPUP) {
+            const HMENU pluginsMenu = reinterpret_cast<HMENU>(
+                SendMessageW(g_nppData._nppHandle, NPPM_GETMENUHANDLE, NPPPLUGINMENU, 0));
+            if (reinterpret_cast<HMENU>(message->wParam) == pluginsMenu) {
+                debugLog(L"Plugins menu opened; reapplying translated labels");
+                applyTranslatedPluginMenu();
+            }
+        }
+    }
+    return CallNextHookEx(g_pluginMenuMessageHook, code, wParam, lParam);
+}
+
+static void installPluginMenuMessageHook()
+{
+    if (g_pluginMenuMessageHook || !g_nppData._nppHandle) return;
+    const DWORD threadId = GetWindowThreadProcessId(g_nppData._nppHandle, nullptr);
+    if (!threadId) return;
+    g_pluginMenuMessageHook = SetWindowsHookExW(WH_CALLWNDPROC, pluginMenuMessageHook, g_hModule, threadId);
+    debugLog(L"Plugins menu message hook installed=" + std::to_wstring(g_pluginMenuMessageHook != nullptr));
+}
+
+static void removePluginMenuMessageHook()
+{
+    if (!g_pluginMenuMessageHook) return;
+    UnhookWindowsHookEx(g_pluginMenuMessageHook);
+    g_pluginMenuMessageHook = nullptr;
+    debugLog(L"Plugins menu message hook removed");
 }
 
 static std::string debugWideToUtf8(const std::wstring& s)
@@ -238,6 +519,12 @@ static bool isAbsolutePath(const std::wstring& path)
     return false;
 }
 
+static std::wstring normalizeWindowsPathSeparators(std::wstring path)
+{
+    std::replace(path.begin(), path.end(), L'/', L'\\');
+    return path;
+}
+
 static std::wstring fullPath(const std::wstring& path)
 {
     if (path.empty()) return L"";
@@ -258,7 +545,7 @@ static std::wstring settingsFilePath()
     wchar_t appData[MAX_PATH * 4] = {};
     DWORD n = GetEnvironmentVariableW(L"APPDATA", appData, static_cast<DWORD>(std::size(appData)));
     if (!n || n >= std::size(appData)) return L"";
-    return joinPath(joinPath(joinPath(std::wstring(appData, n), L"Notepad++"), L"plugins"), L"config\\NppNodeJS.ini");
+    return joinPath(joinPath(joinPath(std::wstring(appData, n), L"Notepad++"), L"plugins"), L"config\\NppMenuScripts.ini");
 }
 
 static std::wstring loadConfiguredMenuPath()
@@ -364,7 +651,7 @@ static bool createHotkeyWindow()
         debugLog(L"createOutputPane RegisterClassExW failed error=" + std::to_wstring(GetLastError()));
         return false;
     }
-    g_hotkeyWnd = CreateWindowExW(0, HOTKEY_CLASS_NAME, L"NppNodeJS Hotkey", 0,
+    g_hotkeyWnd = CreateWindowExW(0, HOTKEY_CLASS_NAME, L"NppMenuScripts Hotkey", 0,
                                   0, 0, 0, 0, HWND_MESSAGE, nullptr, g_hModule, nullptr);
     return g_hotkeyWnd != nullptr;
 }
@@ -379,8 +666,8 @@ static void setMenuJsonPath()
 {
     if (g_processRunning.load()) {
         MessageBoxW(g_nppData._nppHandle,
-                    L"Please wait until the current Node.js script has finished before changing the menu configuration file.",
-                    L"NppNodeJS - Set menu.json Path", MB_OK | MB_ICONINFORMATION);
+                    tr("PleaseWaitSetPath").c_str(),
+                    (std::wstring(L"NppMenuScripts - ") + tr("SetMenuJsonPath")).c_str(), MB_OK | MB_ICONINFORMATION);
         return;
     }
 
@@ -393,9 +680,17 @@ static void setMenuJsonPath()
     ofn.hwndOwner = g_nppData._nppHandle;
     ofn.lpstrFile = fileName;
     ofn.nMaxFile = static_cast<DWORD>(std::size(fileName));
-    ofn.lpstrFilter = L"JSON files (*.json)\0*.json\0All files (*.*)\0*.*\0";
+    std::vector<wchar_t> filters;
+    for (const auto& entry : {std::pair<std::wstring, std::wstring>{tr("JsonFiles"), L"*.json"},
+                              std::pair<std::wstring, std::wstring>{tr("AllFiles"), L"*.*"}}) {
+        filters.insert(filters.end(), entry.first.begin(), entry.first.end()); filters.push_back(L'\0');
+        filters.insert(filters.end(), entry.second.begin(), entry.second.end()); filters.push_back(L'\0');
+    }
+    filters.push_back(L'\0');
+    ofn.lpstrFilter = filters.data();
     ofn.nFilterIndex = 1;
-    ofn.lpstrTitle = L"Select NppNodeJS menu.json";
+    const std::wstring dialogTitle = tr("SelectMenuJson");
+    ofn.lpstrTitle = dialogTitle.c_str();
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
 
     if (!GetOpenFileNameW(&ofn)) return;
@@ -411,10 +706,12 @@ static void setMenuJsonPath()
         return;
     }
 
+    setNppStatusText(trFormat("UsingMenuJson", {{L"{path}", g_menuJsonPath}}));
+
     if (!saveConfiguredMenuPath(selected)) {
         MessageBoxW(g_nppData._nppHandle,
-                    L"The menu configuration was changed, but NppNodeJS could not save the new path.\r\n\r\nThe new path will remain active until Notepad++ is restarted.",
-                    L"NppNodeJS - Set menu.json Path", MB_OK | MB_ICONWARNING);
+                    tr("MenuPathSaveFailed").c_str(),
+                    (std::wstring(L"NppMenuScripts - ") + tr("SetMenuJsonPath")).c_str(), MB_OK | MB_ICONWARNING);
     }
 }
 
@@ -422,8 +719,8 @@ static void openScriptsFolder()
 {
     if (g_processRunning.load()) {
         MessageBoxW(g_nppData._nppHandle,
-                    L"Please wait until the current Node.js script has finished.",
-                    L"NppNodeJS - Open Scripts Folder", MB_OK | MB_ICONINFORMATION);
+                    tr("PleaseWait").c_str(),
+                    (std::wstring(L"NppMenuScripts - ") + tr("OpenScriptsFolder")).c_str(), MB_OK | MB_ICONINFORMATION);
         return;
     }
 
@@ -436,15 +733,15 @@ static void openScriptsFolder()
     if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
         const int answer = MessageBoxW(
             g_nppData._nppHandle,
-            L"The scripts folder does not exist. Create it?",
-            L"NppNodeJS - Open Scripts Folder",
+            tr("ScriptsFolderMissing").c_str(),
+            (std::wstring(L"NppMenuScripts - ") + tr("OpenScriptsFolder")).c_str(),
             MB_YESNO | MB_ICONQUESTION);
         if (answer != IDYES) return;
         const int result = SHCreateDirectoryExW(g_nppData._nppHandle, folder.c_str(), nullptr);
         if (result != ERROR_SUCCESS && result != ERROR_FILE_EXISTS && result != ERROR_ALREADY_EXISTS) {
             MessageBoxW(g_nppData._nppHandle,
-                        L"Unable to create the scripts folder.",
-                        L"NppNodeJS - Open Scripts Folder", MB_OK | MB_ICONERROR);
+                        tr("CreateScriptsFolderFailed").c_str(),
+                        (std::wstring(L"NppMenuScripts - ") + tr("OpenScriptsFolder")).c_str(), MB_OK | MB_ICONERROR);
             return;
         }
     }
@@ -453,8 +750,8 @@ static void openScriptsFolder()
         g_nppData._nppHandle, L"open", folder.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     if (reinterpret_cast<INT_PTR>(result) <= 32) {
         MessageBoxW(g_nppData._nppHandle,
-                    L"Unable to open the scripts folder.",
-                    L"NppNodeJS - Open Scripts Folder", MB_OK | MB_ICONWARNING);
+                    tr("OpenScriptsFolderFailed").c_str(),
+                    (std::wstring(L"NppMenuScripts - ") + tr("OpenScriptsFolder")).c_str(), MB_OK | MB_ICONWARNING);
     }
 }
 
@@ -463,8 +760,8 @@ static void openMenuJson()
     const std::wstring path = g_menuJsonPath.empty() ? loadConfiguredMenuPath() : g_menuJsonPath;
     if (path.empty() || GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
         MessageBoxW(g_nppData._nppHandle,
-                    L"The current menu.json file does not exist.",
-                    L"NppNodeJS - Open menu.json", MB_OK | MB_ICONERROR);
+                    tr("MenuJsonMissing").c_str(),
+                    (std::wstring(L"NppMenuScripts - ") + tr("OpenMenuJson")).c_str(), MB_OK | MB_ICONERROR);
         return;
     }
     SendMessageW(g_nppData._nppHandle, NPPM_DOOPEN, 0,
@@ -475,8 +772,8 @@ static void rebuildMenu()
 {
     if (g_processRunning.load()) {
         MessageBoxW(g_nppData._nppHandle,
-                    L"Please wait until the current Node.js script has finished before rebuilding the menu.",
-                    L"NppNodeJS - Rebuild Menu", MB_OK | MB_ICONINFORMATION);
+                    tr("PleaseWaitRebuild").c_str(),
+                    (std::wstring(L"NppMenuScripts - ") + tr("RebuildMenuToolbar")).c_str(), MB_OK | MB_ICONINFORMATION);
         return;
     }
 
@@ -486,6 +783,8 @@ static void rebuildMenu()
     // installMenus() validates the new configuration before removing the current menu.
     if (!installMenus(path, true)) {
         installMenus(path, false);
+    } else {
+        setNppStatusText(trFormat("MenuRebuilt", {{L"{path}", g_menuJsonPath}}));
     }
 }
 
@@ -493,12 +792,12 @@ static void showAbout()
 {
     const HINSTANCE result = ShellExecuteW(
         g_nppData._nppHandle, L"open",
-        L"https://github.com/seantw/NppNodeJS",
+        L"https://github.com/seantw/NppMenuScripts",
         nullptr, nullptr, SW_SHOWNORMAL);
     if (reinterpret_cast<INT_PTR>(result) <= 32) {
         MessageBoxW(g_nppData._nppHandle,
-                    L"Unable to open the NppNodeJS GitHub page.",
-                    L"NppNodeJS", MB_OK | MB_ICONWARNING);
+                    tr("OpenGithubFailed").c_str(),
+                    L"NppMenuScripts", MB_OK | MB_ICONWARNING);
     }
 }
 
@@ -510,19 +809,96 @@ static HWND currentScintilla()
     return which == 0 ? g_nppData._scintillaMainHandle : g_nppData._scintillaSecondHandle;
 }
 
-static std::wstring filterAnsi(const std::wstring& input)
+struct StyledOutputRun {
+    std::wstring text;
+    int ansiColor = -1;
+};
+
+static bool parseSgrParameters(const std::wstring& parameters, int& foregroundColor)
 {
-    std::wstring out; out.reserve(input.size());
-    for (size_t i = 0; i < input.size();) {
-        if (input[i] != L'\x1b') { out.push_back(input[i++]); continue; }
-        ++i; if (i >= input.size()) break;
-        if (input[i] == L'[') {
-            ++i; while (i < input.size()) { wchar_t c = input[i++]; if (c >= 0x40 && c <= 0x7E) break; }
-        } else if (input[i] == L']') {
-            ++i; while (i < input.size()) { wchar_t c = input[i++]; if (c == L'\a') break; if (c == L'\x1b' && i < input.size() && input[i] == L'\\') { ++i; break; } }
-        } else { ++i; }
+    std::vector<int> codes;
+    size_t start = 0;
+    for (size_t i = 0; i <= parameters.size(); ++i) {
+        if (i != parameters.size() && parameters[i] != L';') continue;
+        if (i == start) {
+            codes.push_back(0);
+        } else {
+            int value = 0;
+            for (size_t digit = start; digit < i; ++digit) {
+                if (parameters[digit] < L'0' || parameters[digit] > L'9') return false;
+                value = value * 10 + (parameters[digit] - L'0');
+                if (value > 10000) return false;
+            }
+            codes.push_back(value);
+        }
+        start = i + 1;
     }
-    return out;
+
+    for (size_t i = 0; i < codes.size(); ++i) {
+        const int code = codes[i];
+        if (code == 0 || code == 39) {
+            foregroundColor = -1;
+        } else if (code >= 30 && code <= 37) {
+            foregroundColor = code - 30;
+        } else if (code >= 90 && code <= 97) {
+            foregroundColor = code - 90 + 8;
+        } else if (code == 38 || code == 48 || code == 58) {
+            // Consume extended foreground/background/underline colors, which
+            // are intentionally unsupported, so their numeric components are
+            // not mistaken for ordinary SGR attributes.
+            if (i + 1 < codes.size() && codes[i + 1] == 5) i = std::min(i + 2, codes.size() - 1);
+            else if (i + 1 < codes.size() && codes[i + 1] == 2) i = std::min(i + 4, codes.size() - 1);
+        }
+        // Background colors and other SGR attributes are ignored. The output
+        // pane keeps its Notepad++ theme background and existing base styles.
+    }
+    return true;
+}
+
+static std::vector<StyledOutputRun> parseAnsiOutput(const std::wstring& input, int& foregroundColor)
+{
+    std::vector<StyledOutputRun> runs;
+    std::wstring text;
+    int runColor = foregroundColor;
+    auto flush = [&]() {
+        if (!text.empty()) {
+            runs.push_back({std::move(text), runColor});
+            text.clear();
+        }
+    };
+
+    for (size_t i = 0; i < input.size();) {
+        if (input[i] != L'\x1b') {
+            text.push_back(input[i++]);
+            continue;
+        }
+        ++i;
+        if (i >= input.size()) break;
+        if (input[i] == L'[') {
+            const size_t parameterStart = ++i;
+            while (i < input.size() && !(input[i] >= 0x40 && input[i] <= 0x7E)) ++i;
+            if (i >= input.size()) break;
+            const wchar_t finalByte = input[i];
+            if (finalByte == L'm') {
+                flush();
+                parseSgrParameters(input.substr(parameterStart, i - parameterStart), foregroundColor);
+                runColor = foregroundColor;
+            }
+            ++i;
+        } else if (input[i] == L']') {
+            ++i;
+            while (i < input.size()) {
+                const wchar_t c = input[i++];
+                if (c == L'\a') break;
+                if (c == L'\x1b' && i < input.size() && input[i] == L'\\') { ++i; break; }
+            }
+        } else {
+            // Drop unsupported single-character escape sequences.
+            ++i;
+        }
+    }
+    flush();
+    return runs;
 }
 
 static std::string wideToUtf8(const std::wstring& s)
@@ -570,24 +946,31 @@ static void clearOutputPane()
     SendMessageW(g_outputEdit, 2171 /* SCI_SETREADONLY */, TRUE, 0);
 }
 
-static void appendOutput(const std::wstring& text)
+static void appendOutput(const std::wstring& text, bool isStderr = false)
 {
     if (!g_outputEdit || text.empty()) {
         debugLog(L"appendOutput skipped edit=" + hexPtr(g_outputEdit) + L" textEmpty=" + std::to_wstring(text.empty()));
         return;
     }
     debugLog(L"appendOutput input wchar=" + std::to_wstring(text.size()));
-    const std::wstring filtered = normalizeOutputNewlines(filterAnsi(text));
-    if (filtered.empty()) { debugLog(L"appendOutput filtered empty"); return; }
-    const std::string utf8 = wideToUtf8(filtered);
-    if (utf8.empty()) { debugLog(L"appendOutput UTF-8 conversion empty"); return; }
-    debugLog(L"appendOutput filtered wchar=" + std::to_wstring(filtered.size()) + L" utf8=" + std::to_wstring(utf8.size()));
+    int& foregroundColor = isStderr ? g_stderrAnsiColor : g_stdoutAnsiColor;
+    std::vector<StyledOutputRun> runs = parseAnsiOutput(text, foregroundColor);
+    for (auto& run : runs) run.text = normalizeOutputNewlines(run.text);
+    runs.erase(std::remove_if(runs.begin(), runs.end(), [](const StyledOutputRun& run) {
+        return run.text.empty();
+    }), runs.end());
+    if (runs.empty()) { debugLog(L"appendOutput filtered empty"); return; }
 
     // SCI_APPENDTEXT is a document modification and is ignored while the
     // Scintilla document is read-only. Temporarily unlock for each chunk.
-    constexpr UINT SCI_GETLENGTH = 2008;
+    constexpr UINT SCI_GETLENGTH = 2006;
     constexpr UINT SCI_GOTOPOS = 2025;
     constexpr UINT SCI_ADDTEXT = 2001;
+    constexpr UINT SCI_STARTSTYLING = 2032;
+    constexpr UINT SCI_SETSTYLING = 2033;
+    constexpr int STYLE_DEFAULT = 32;
+    constexpr int STYLE_STDERR = 1;
+    constexpr int STYLE_ANSI_BASE = 2;
 
     SendMessageW(g_outputEdit, 2171 /* SCI_SETREADONLY */, FALSE, 0);
     // Put the insertion point at EOF explicitly.  This avoids depending on
@@ -595,8 +978,16 @@ static void appendOutput(const std::wstring& text)
     const LRESULT length = SendMessageW(g_outputEdit, SCI_GETLENGTH, 0, 0);
     debugLog(L"appendOutput before length=" + std::to_wstring(length));
     SendMessageW(g_outputEdit, SCI_GOTOPOS, static_cast<WPARAM>(length), 0);
-    SendMessageW(g_outputEdit, SCI_ADDTEXT, static_cast<WPARAM>(utf8.size()),
-                 reinterpret_cast<LPARAM>(utf8.data()));
+    SendMessageW(g_outputEdit, SCI_STARTSTYLING, static_cast<WPARAM>(length), 0xFF);
+    for (const auto& run : runs) {
+        const std::string utf8 = wideToUtf8(run.text);
+        if (utf8.empty()) continue;
+        SendMessageW(g_outputEdit, SCI_ADDTEXT, static_cast<WPARAM>(utf8.size()),
+                     reinterpret_cast<LPARAM>(utf8.data()));
+        const int style = run.ansiColor >= 0 ? STYLE_ANSI_BASE + run.ansiColor
+            : isStderr ? STYLE_STDERR : STYLE_DEFAULT;
+        SendMessageW(g_outputEdit, SCI_SETSTYLING, static_cast<WPARAM>(utf8.size()), style);
+    }
 
     // Move the caret to the end so the newest output stays visible.
     const LRESULT newLength = SendMessageW(g_outputEdit, SCI_GETLENGTH, 0, 0);
@@ -606,20 +997,37 @@ static void appendOutput(const std::wstring& text)
     SendMessageW(g_outputEdit, 2171 /* SCI_SETREADONLY */, TRUE, 0);
 }
 
-static void updateOutputPaneTitle(bool running)
+static bool setNppStatusText(const std::wstring& text)
 {
-    if (!g_outputPane) return;
+    if (!g_nppData._nppHandle) return false;
+    const LRESULT result = SendMessageW(g_nppData._nppHandle, NPPM_SETSTATUSBAR,
+                                        STATUSBAR_DOC_TYPE,
+                                        reinterpret_cast<LPARAM>(text.c_str()));
+    debugLog(L"setNppStatusText result=" + std::to_wstring(result) + L" text=\"" + text + L"\"");
+    return result != FALSE;
+}
 
-    // Notepad++ keeps the DockedWidgetData pointer registered with the
-    // docking manager. Keep pszAddInfo pointing to one permanent buffer
-    // instead of replacing the pointer or changing uMask after registration.
-    // NPPM_DMMUPDATEDISPINFO then redraws the title using the current text.
-    wcscpy_s(g_outputAddInfo, running ? L"Running" : L"");
-    SendMessageW(g_nppData._nppHandle, NPPM_DMMUPDATEDISPINFO, 0,
-                 reinterpret_cast<LPARAM>(g_outputPane));
-    g_outputRunningTitle = running;
-    debugLog(std::wstring(L"updateOutputPaneTitle running=") + (running ? L"true" : L"false") +
-             L" addInfo=\"" + g_outputAddInfo + L"\"");
+static bool setOutputPaneTitle(const std::wstring& text)
+{
+    g_outputTitle = text;
+    if (!g_outputPane) return true;
+
+    g_outputDock.pszName = g_outputTitle.c_str();
+    const LRESULT result = SendMessageW(g_nppData._nppHandle, NPPM_DMMUPDATEDISPINFO, 0,
+                                        reinterpret_cast<LPARAM>(g_outputPane));
+    debugLog(L"setOutputPaneTitle result=" + std::to_wstring(result) + L" title=\"" + text + L"\"");
+    return result != FALSE;
+}
+
+static bool postRunStatus(const std::wstring& text, bool restoreEditorFocus = false)
+{
+    if (!g_hotkeyWnd) return false;
+    auto* payload = new RunStatePayload{text, restoreEditorFocus};
+    if (!PostMessageW(g_hotkeyWnd, WM_NPPMENUSCRIPTS_RUNSTATE, 0, reinterpret_cast<LPARAM>(payload))) {
+        delete payload;
+        return false;
+    }
+    return true;
 }
 
 static void showOutputPane()
@@ -700,6 +1108,28 @@ static void applyOutputPaneBorderLayout(HWND pane)
     ShowWindow(g_outputEdit, SW_SHOW);
     SetWindowPos(g_outputEdit, nullptr, b, b, width, height,
                  SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW);
+}
+
+static void setOutputCaretVisible(bool visible)
+{
+    if (!g_outputEdit) return;
+    constexpr UINT SCI_SETCARETSTYLE = 2512;
+    constexpr UINT SCI_GETCARETSTYLE = 2513;
+    constexpr int CARETSTYLE_INVISIBLE = 0;
+    constexpr int CARETSTYLE_LINE = 1;
+
+    const int currentStyle = static_cast<int>(SendMessageW(
+        g_outputEdit, SCI_GETCARETSTYLE, 0, 0));
+    if (visible) {
+        const int style = g_outputCaretStyleCaptured ? g_outputCaretStyle : CARETSTYLE_LINE;
+        SendMessageW(g_outputEdit, SCI_SETCARETSTYLE, style, 0);
+    } else {
+        if (currentStyle != CARETSTYLE_INVISIBLE) {
+            g_outputCaretStyle = currentStyle;
+            g_outputCaretStyleCaptured = true;
+        }
+        SendMessageW(g_outputEdit, SCI_SETCARETSTYLE, CARETSTYLE_INVISIBLE, 0);
+    }
 }
 
 static void applyOutputStyle()
@@ -788,6 +1218,38 @@ static void applyOutputStyle()
     if (fontName[0])
         SendMessageA(g_outputEdit, SCI_STYLESETFONT, STYLE_DEFAULT, reinterpret_cast<LPARAM>(fontName));
 
+    // Keep stderr readable with both light and dark editor themes.
+    constexpr int STYLE_STDERR = 1;
+    constexpr int STYLE_ANSI_BASE = 2;
+    const int backgroundBrightness =
+        (GetRValue(g_outputBack) * 299 + GetGValue(g_outputBack) * 587 +
+         GetBValue(g_outputBack) * 114) / 1000;
+    const COLORREF stderrFore = backgroundBrightness > 128
+        ? RGB(180, 0, 0) : RGB(255, 110, 110);
+    SendMessageW(g_outputEdit, SCI_STYLESETFORE, STYLE_STDERR, stderrFore);
+
+    const bool darkBackground = backgroundBrightness <= 128;
+    const COLORREF ansiPalette[16] = {
+        darkBackground ? RGB(150, 150, 150) : RGB(0, 0, 0),
+        darkBackground ? RGB(255, 110, 110) : RGB(128, 0, 0),
+        darkBackground ? RGB(130, 220, 130) : RGB(0, 128, 0),
+        darkBackground ? RGB(255, 220, 110) : RGB(128, 96, 0),
+        darkBackground ? RGB(130, 170, 255) : RGB(0, 0, 160),
+        darkBackground ? RGB(220, 140, 255) : RGB(128, 0, 128),
+        darkBackground ? RGB(100, 220, 220) : RGB(0, 128, 128),
+        darkBackground ? RGB(235, 235, 235) : RGB(96, 96, 96),
+        darkBackground ? RGB(190, 190, 190) : RGB(96, 96, 96),
+        darkBackground ? RGB(255, 150, 150) : RGB(220, 0, 0),
+        darkBackground ? RGB(160, 255, 160) : RGB(0, 160, 0),
+        darkBackground ? RGB(255, 245, 150) : RGB(170, 125, 0),
+        darkBackground ? RGB(170, 200, 255) : RGB(0, 0, 220),
+        darkBackground ? RGB(245, 170, 255) : RGB(190, 0, 190),
+        darkBackground ? RGB(140, 255, 255) : RGB(0, 150, 150),
+        darkBackground ? RGB(255, 255, 255) : RGB(48, 48, 48)
+    };
+    for (int color = 0; color < 16; ++color)
+        SendMessageW(g_outputEdit, SCI_STYLESETFORE, STYLE_ANSI_BASE + color, ansiPalette[color]);
+
     // Copy both active and inactive selection elements while preserving whether
     // the source explicitly sets a colour or relies on Scintilla's defaults.
     // Setting an unset element as colour 0 makes it fully transparent.
@@ -841,6 +1303,7 @@ static void applyOutputStyle()
     SendMessageW(g_outputEdit, SCI_SETCARETFORE, g_outputFore, 0);
     SendMessageW(g_outputEdit, SCI_SETREADONLY, TRUE, 0);
     SendMessageW(g_outputEdit, SCI_SETSEL, 0, 0);
+    setOutputCaretVisible(!g_processRunning.load());
     InvalidateRect(g_outputEdit, nullptr, TRUE);
 }
 
@@ -911,9 +1374,8 @@ static bool createOutputPane()
     g_outputDock.hClient = g_outputPane;
     g_outputDock.pszName = g_outputTitle.c_str();
     g_outputDock.dlgID = OUTPUT_DLG_ID;
-    g_outputDock.uMask = DWS_DF_CONT_BOTTOM | DWS_ADDINFO;
-    g_outputAddInfo[0] = L'\0';
-    g_outputDock.pszAddInfo = g_outputAddInfo;
+    g_outputDock.uMask = DWS_DF_CONT_BOTTOM;
+    g_outputDock.pszAddInfo = nullptr;
     g_outputDock.pszModuleName = PLUGIN_NAME;
 
     const LRESULT dockResult = SendMessageW(g_nppData._nppHandle, NPPM_DMMREGASDCKDLG, 0,
@@ -978,9 +1440,20 @@ private:
     std::string _pending;
 };
 
+struct PipeReaderState {
+    HANDLE pipe = nullptr;
+    bool isStderr = false;
+    bool open = true;
+    Utf8StreamDecoder decoder;
+    std::string rawPending;
+    std::string protocolPending;
+};
+
 static std::string encodeBase64(const std::string& input);
 static std::string decodeBase64(const std::string& encoded, bool& ok);
 static std::wstring getCurrentFilePath();
+static std::wstring getFullPathFromBufferId(UINT_PTR bufferId);
+static std::vector<UINT_PTR> getOpenBufferIds();
 static std::pair<long, long> getCurrentCursor();
 
 struct SystemDialogButtonTextState {
@@ -1385,7 +1858,7 @@ static bool showConfirmDialog(const std::wstring& message, const std::wstring& t
 
 static bool handleConfirmProtocolLine(const std::string& line)
 {
-    static const std::string prefix = "\x1eNPPNODE_CONFIRM:";
+    static const std::string prefix = "\x1eNPPMENUSCRIPTS_CONFIRM:";
     if (line.rfind(prefix, 0) != 0) return false;
 
     const std::string payload = line.substr(prefix.size());
@@ -1424,7 +1897,7 @@ static bool handleConfirmProtocolLine(const std::string& line)
 
 static bool handlePromptProtocolLine(const std::string& line)
 {
-    static const std::string prefix = "\x1eNPPNODE_PROMPT:";
+    static const std::string prefix = "\x1eNPPMENUSCRIPTS_PROMPT:";
     if (line.rfind(prefix, 0) != 0) return false;
 
     const std::string payload = line.substr(prefix.size());
@@ -1494,7 +1967,7 @@ static std::string decodeBase64(const std::string& encoded, bool& ok)
 
 static bool handleGetFileProtocolLine(const std::string& line)
 {
-    static const std::string prefix = "\x1eNPPNODE_GETFILE:";
+    static const std::string prefix = "\x1eNPPMENUSCRIPTS_GETFILE:";
     if (line != prefix) return false;
 
     const std::string response = "OK:" + encodeBase64(debugWideToUtf8(getCurrentFilePath())) + "\n";
@@ -1518,6 +1991,200 @@ static bool writeProtocolResponse(const std::string& response)
     const BOOL ok = WriteFile(g_stdinWrite, response.data(), static_cast<DWORD>(response.size()), &written, nullptr);
     FlushFileBuffers(g_stdinWrite);
     return ok && written == response.size();
+}
+
+static bool handleSaveFileProtocolLine(const std::string& line)
+{
+    static const std::string prefix = "\x1eNPPMENUSCRIPTS_SAVEFILE:";
+    if (line != prefix) return false;
+
+    bool saved = false;
+    if (!getCurrentFilePath().empty()) {
+        HWND sci = currentScintilla();
+        if (sci) {
+            const bool wasModified = SendMessageW(sci, SCI_GETMODIFY_LOCAL, 0, 0) != 0;
+            if (!wasModified) {
+                // File/Save on an unchanged named document is already successful.
+                saved = true;
+            } else {
+                const LRESULT result = SendMessageW(
+                    g_nppData._nppHandle, NPPM_SAVECURRENTFILE, 0, 0);
+                const bool remainsModified = SendMessageW(sci, SCI_GETMODIFY_LOCAL, 0, 0) != 0;
+                saved = result != FALSE || !remainsModified;
+            }
+        }
+    }
+
+    writeProtocolResponse(saved ? "OK\n" : "ERROR\n");
+    debugLog(L"protocol saveFile result=" + std::to_wstring(saved));
+    return true;
+}
+
+static bool handleOpenFileProtocolLine(const std::string& line)
+{
+    static const std::string openPrefix = "\x1eNPPMENUSCRIPTS_OPENFILE:";
+    static const std::string backgroundPrefix = "\x1eNPPMENUSCRIPTS_OPENFILEINBACKGROUND:";
+    const bool background = line.rfind(backgroundPrefix, 0) == 0;
+    const std::string& prefix = background ? backgroundPrefix : openPrefix;
+    if (!background && line.rfind(openPrefix, 0) != 0) return false;
+
+    bool decodedOk = false;
+    const std::string decodedPath = decodeBase64(line.substr(prefix.size()), decodedOk);
+    bool opened = false;
+    bool restored = true;
+    UINT_PTR previousBufferId = 0;
+    int previousView = 0;
+
+    if (decodedOk && !decodedPath.empty()) {
+        const std::wstring path = normalizeWindowsPathSeparators(utf8ToWide(decodedPath.c_str()));
+        if (background) {
+            previousBufferId = static_cast<UINT_PTR>(SendMessageW(
+                g_nppData._nppHandle, NPPM_GETCURRENTBUFFERID_LOCAL, 0, 0));
+            previousView = static_cast<int>(SendMessageW(
+                g_nppData._nppHandle, NPPM_GETCURRENTVIEW_LOCAL, 0, 0));
+        }
+
+        opened = SendMessageW(g_nppData._nppHandle, NPPM_DOOPEN, 0,
+                              reinterpret_cast<LPARAM>(path.c_str())) != FALSE;
+
+        if (opened && background && previousBufferId) {
+            const LRESULT position = SendMessageW(
+                g_nppData._nppHandle, NPPM_GETPOSFROMBUFFERID_LOCAL,
+                static_cast<WPARAM>(previousBufferId), static_cast<LPARAM>(previousView));
+            if (position < 0) {
+                restored = false;
+            } else {
+                const auto packedPosition = static_cast<UINT_PTR>(position);
+                const int view = static_cast<int>((packedPosition >> 30) & 0x3);
+                const int index = static_cast<int>(packedPosition & 0x3fffffff);
+                restored = SendMessageW(g_nppData._nppHandle, NPPM_ACTIVATEDOC_LOCAL,
+                                        static_cast<WPARAM>(view), static_cast<LPARAM>(index)) != FALSE;
+            }
+        }
+    }
+
+    const bool result = opened && restored;
+    writeProtocolResponse(result ? "OK\n" : "ERROR\n");
+    debugLog(L"protocol " + std::wstring(background ? L"openFileInBackground" : L"openFile") +
+             L" result=" + std::to_wstring(result) +
+             L" previousBufferId=" + std::to_wstring(previousBufferId) +
+             L" restored=" + std::to_wstring(restored));
+    return true;
+}
+
+static bool handleGetOpenFilesProtocolLine(const std::string& line)
+{
+    static const std::string prefix = "\x1eNPPMENUSCRIPTS_GETOPENFILES:";
+    if (line != prefix) return false;
+
+    std::string payload = "OK:";
+    bool first = true;
+    std::vector<UINT_PTR> emittedBufferIds;
+    for (const UINT_PTR bufferId : getOpenBufferIds()) {
+        if (std::find(emittedBufferIds.begin(), emittedBufferIds.end(), bufferId) != emittedBufferIds.end())
+            continue;
+        emittedBufferIds.push_back(bufferId);
+        const std::wstring path = getFullPathFromBufferId(bufferId);
+        // Notepad++ may return an untitled tab's display label (for example,
+        // "new 1") instead of an empty path. Only return actual absolute paths.
+        if (!isAbsolutePath(path)) continue;
+        if (!first) payload.push_back('|');
+        payload += encodeBase64(debugWideToUtf8(path));
+        first = false;
+    }
+    payload.push_back('\n');
+    writeProtocolResponse(payload);
+    return true;
+}
+
+static bool handleCloseFileProtocolLine(const std::string& line)
+{
+    static const std::string prefix = "\x1eNPPMENUSCRIPTS_CLOSEFILE:";
+    if (line.rfind(prefix, 0) != 0) return false;
+
+    bool decodedOk = false;
+    const std::string decodedPath = decodeBase64(line.substr(prefix.size()), decodedOk);
+    if (!decodedOk || decodedPath.empty()) {
+        writeProtocolResponse("ERROR\n");
+        return true;
+    }
+
+    const UINT_PTR previousBufferId = static_cast<UINT_PTR>(SendMessageW(
+        g_nppData._nppHandle, NPPM_GETCURRENTBUFFERID_LOCAL, 0, 0));
+    const int previousView = static_cast<int>(SendMessageW(
+        g_nppData._nppHandle, NPPM_GETCURRENTVIEW_LOCAL, 0, 0));
+    const std::wstring path = normalizeWindowsPathSeparators(utf8ToWide(decodedPath.c_str()));
+    const bool switched = SendMessageW(g_nppData._nppHandle, NPPM_SWITCHTOFILE, 0,
+                                       reinterpret_cast<LPARAM>(path.c_str())) != FALSE;
+    if (!switched) {
+        writeProtocolResponse("ERROR\n");
+        return true;
+    }
+
+    const UINT_PTR targetBufferId = static_cast<UINT_PTR>(SendMessageW(
+        g_nppData._nppHandle, NPPM_GETCURRENTBUFFERID_LOCAL, 0, 0));
+    const std::vector<UINT_PTR> buffersBefore = getOpenBufferIds();
+    const size_t occurrencesBefore = static_cast<size_t>(std::count(
+        buffersBefore.begin(), buffersBefore.end(), targetBufferId));
+    SendMessageW(g_nppData._nppHandle, NPPM_MENUCOMMAND, 0, 41003 /* IDM_FILE_CLOSE */);
+    const std::vector<UINT_PTR> buffersAfter = getOpenBufferIds();
+    const size_t occurrencesAfter = static_cast<size_t>(std::count(
+        buffersAfter.begin(), buffersAfter.end(), targetBufferId));
+    const bool closed = targetBufferId != 0 && occurrencesAfter < occurrencesBefore;
+
+    if (previousBufferId != 0 &&
+        std::find(buffersAfter.begin(), buffersAfter.end(), previousBufferId) != buffersAfter.end()) {
+        LRESULT position = SendMessageW(g_nppData._nppHandle, NPPM_GETPOSFROMBUFFERID_LOCAL,
+                                        static_cast<WPARAM>(previousBufferId),
+                                        static_cast<LPARAM>(previousView));
+        if (position < 0) {
+            const int otherView = previousView == MAIN_VIEW ? SUB_VIEW : MAIN_VIEW;
+            position = SendMessageW(g_nppData._nppHandle, NPPM_GETPOSFROMBUFFERID_LOCAL,
+                                    static_cast<WPARAM>(previousBufferId),
+                                    static_cast<LPARAM>(otherView));
+        }
+        if (position >= 0) {
+            const auto packedPosition = static_cast<UINT_PTR>(position);
+            const int view = static_cast<int>((packedPosition >> 30) & 0x3);
+            const int index = static_cast<int>(packedPosition & 0x3fffffff);
+            SendMessageW(g_nppData._nppHandle, NPPM_ACTIVATEDOC_LOCAL,
+                         static_cast<WPARAM>(view), static_cast<LPARAM>(index));
+        }
+    }
+
+    writeProtocolResponse(closed ? "OK\n" : "ERROR\n");
+    debugLog(L"protocol closeFile result=" + std::to_wstring(closed) +
+             L" targetBufferId=" + std::to_wstring(targetBufferId) +
+             L" occurrencesBefore=" + std::to_wstring(occurrencesBefore) +
+             L" occurrencesAfter=" + std::to_wstring(occurrencesAfter));
+    return true;
+}
+
+static bool handleSetStatusBarTextProtocolLine(const std::string& line)
+{
+    static const std::string prefix = "\x1eNPPMENUSCRIPTS_SETSTATUSBARTEXT:";
+    if (line.rfind(prefix, 0) != 0) return false;
+
+    bool decodedOk = false;
+    const std::string decoded = decodeBase64(line.substr(prefix.size()), decodedOk);
+    const bool result = decodedOk && setNppStatusText(utf8ToWide(decoded.c_str()));
+    if (result) g_scriptSetStatusBarText.store(true);
+    writeProtocolResponse(result ? "OK\n" : "ERROR\n");
+    debugLog(L"protocol setStatusBarText result=" + std::to_wstring(result));
+    return true;
+}
+
+static bool handleSetOutputPaneTitleProtocolLine(const std::string& line)
+{
+    static const std::string prefix = "\x1eNPPMENUSCRIPTS_SETOUTPUTPANETITLE:";
+    if (line.rfind(prefix, 0) != 0) return false;
+
+    bool decodedOk = false;
+    const std::string decoded = decodeBase64(line.substr(prefix.size()), decodedOk);
+    const bool result = decodedOk && setOutputPaneTitle(utf8ToWide(decoded.c_str()));
+    writeProtocolResponse(result ? "OK\n" : "ERROR\n");
+    debugLog(L"protocol setOutputPaneTitle result=" + std::to_wstring(result));
+    return true;
 }
 
 static std::wstring getCurrentLineText()
@@ -1610,40 +2277,40 @@ static bool handleTextProtocolLine(const std::string& line)
     };
 
     std::string payload;
-    if (splitPayload("\x1eNPPNODE_GETLINE:", payload)) {
+    if (splitPayload("\x1eNPPMENUSCRIPTS_GETLINE:", payload)) {
         const std::string response = "OK:" + encodeBase64(debugWideToUtf8(getCurrentLineText())) + "\n";
         writeProtocolResponse(response);
         return true;
     }
-    if (splitPayload("\x1eNPPNODE_SETLINE:", payload)) {
+    if (splitPayload("\x1eNPPMENUSCRIPTS_SETLINE:", payload)) {
         bool ok = false;
         const std::string decoded = decodeBase64(payload, ok);
         const bool result = ok && replaceCurrentLine(utf8ToWide(decoded.c_str()));
         writeProtocolResponse(result ? "OK\n" : "ERROR\n");
         return true;
     }
-    if (splitPayload("\x1eNPPNODE_GETSELECTION:", payload)) {
+    if (splitPayload("\x1eNPPMENUSCRIPTS_GETSELECTION:", payload)) {
         const std::string response = "OK:" + encodeBase64(debugWideToUtf8(getSelectionText())) + "\n";
         writeProtocolResponse(response);
         return true;
     }
-    if (splitPayload("\x1eNPPNODE_SETSELECTION:", payload)) {
+    if (splitPayload("\x1eNPPMENUSCRIPTS_SETSELECTION:", payload)) {
         bool ok = false;
         const std::string decoded = decodeBase64(payload, ok);
         const bool result = ok && replaceSelectionText(utf8ToWide(decoded.c_str()));
         writeProtocolResponse(result ? "OK\n" : "ERROR\n");
         return true;
     }
-    if (splitPayload("\x1eNPPNODE_HASSELECTION:", payload)) {
+    if (splitPayload("\x1eNPPMENUSCRIPTS_HASSELECTION:", payload)) {
         writeProtocolResponse(hasCurrentSelection() ? "OK:1\n" : "OK:0\n");
         return true;
     }
-    if (splitPayload("\x1eNPPNODE_GETTEXT:", payload)) {
+    if (splitPayload("\x1eNPPMENUSCRIPTS_GETTEXT:", payload)) {
         const std::string response = "OK:" + encodeBase64(debugWideToUtf8(getEntireText())) + "\n";
         writeProtocolResponse(response);
         return true;
     }
-    if (splitPayload("\x1eNPPNODE_SETTEXT:", payload)) {
+    if (splitPayload("\x1eNPPMENUSCRIPTS_SETTEXT:", payload)) {
         bool ok = false;
         const std::string decoded = decodeBase64(payload, ok);
         const bool result = ok && replaceEntireText(utf8ToWide(decoded.c_str()));
@@ -1653,9 +2320,105 @@ static bool handleTextProtocolLine(const std::string& line)
     return false;
 }
 
+static bool handleClipboardProtocolLine(const std::string& line)
+{
+    static const std::string getPrefix = "\x1eNPPMENUSCRIPTS_GETCLIPBOARD:";
+    static const std::string setPrefix = "\x1eNPPMENUSCRIPTS_SETCLIPBOARD:";
+
+    if (line == getPrefix) {
+        std::wstring text;
+        if (!OpenClipboard(g_nppData._nppHandle)) {
+            writeProtocolResponse("ERROR\n");
+            return true;
+        }
+
+        HANDLE data = GetClipboardData(CF_UNICODETEXT);
+        if (data) {
+            const wchar_t* clipboardText = static_cast<const wchar_t*>(GlobalLock(data));
+            if (clipboardText) {
+                text.assign(clipboardText);
+                GlobalUnlock(data);
+            }
+        }
+        CloseClipboard();
+        writeProtocolResponse("OK:" + encodeBase64(debugWideToUtf8(text)) + "\n");
+        return true;
+    }
+
+    if (line.rfind(setPrefix, 0) == 0) {
+        bool decodedOk = false;
+        const std::string decoded = decodeBase64(line.substr(setPrefix.size()), decodedOk);
+        if (!decodedOk) {
+            writeProtocolResponse("ERROR\n");
+            return true;
+        }
+
+        const std::wstring text = utf8ToWide(decoded.c_str());
+        const SIZE_T bytes = (text.size() + 1) * sizeof(wchar_t);
+        HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        if (!memory) {
+            writeProtocolResponse("ERROR\n");
+            return true;
+        }
+
+        wchar_t* buffer = static_cast<wchar_t*>(GlobalLock(memory));
+        if (!buffer) {
+            GlobalFree(memory);
+            writeProtocolResponse("ERROR\n");
+            return true;
+        }
+        memcpy(buffer, text.c_str(), bytes);
+        GlobalUnlock(memory);
+
+        bool success = false;
+        if (OpenClipboard(g_nppData._nppHandle)) {
+            if (EmptyClipboard() && SetClipboardData(CF_UNICODETEXT, memory)) {
+                success = true;
+                memory = nullptr; // The system owns the handle after SetClipboardData succeeds.
+            }
+            CloseClipboard();
+        }
+        if (memory) GlobalFree(memory);
+        writeProtocolResponse(success ? "OK\n" : "ERROR\n");
+        return true;
+    }
+
+    return false;
+}
+
+static bool handleRunMenuCommandProtocolLine(const std::string& line)
+{
+    static const std::string prefix = "\x1eNPPMENUSCRIPTS_RUNMENUCOMMAND:";
+    if (line.rfind(prefix, 0) != 0) return false;
+
+    const std::string payload = line.substr(prefix.size());
+    if (payload.empty()) {
+        writeProtocolResponse("ERROR\n");
+        return true;
+    }
+
+    int commandId = 0;
+    for (const char digit : payload) {
+        if (digit < '0' || digit > '9' || commandId > (INT_MAX - (digit - '0')) / 10) {
+            writeProtocolResponse("ERROR\n");
+            return true;
+        }
+        commandId = commandId * 10 + (digit - '0');
+    }
+    if (commandId <= 0) {
+        writeProtocolResponse("ERROR\n");
+        return true;
+    }
+
+    const LRESULT result = SendMessageW(g_nppData._nppHandle, NPPM_MENUCOMMAND, 0,
+                                        static_cast<LPARAM>(commandId));
+    writeProtocolResponse(result ? "OK\n" : "ERROR\n");
+    return true;
+}
+
 static bool handleGetCursorProtocolLine(const std::string& line)
 {
-    static const std::string prefix = "\x1eNPPNODE_GETCURSOR:";
+    static const std::string prefix = "\x1eNPPMENUSCRIPTS_GETCURSOR:";
     if (line != prefix) return false;
 
     const auto [lineNumber, columnNumber] = getCurrentCursor();
@@ -1675,9 +2438,117 @@ static bool handleGetCursorProtocolLine(const std::string& line)
     return true;
 }
 
+static bool handleSetCursorProtocolLine(const std::string& line)
+{
+    static const std::string prefix = "\x1eNPPMENUSCRIPTS_SETCURSOR:";
+    if (line.rfind(prefix, 0) != 0) return false;
+
+    const std::string payload = line.substr(prefix.size());
+    const size_t separator = payload.find(',');
+    if (separator == std::string::npos || separator == 0 || separator + 1 >= payload.size()) {
+        writeProtocolResponse("ERROR\n");
+        return true;
+    }
+
+    auto parseCoordinate = [](const std::string& value, int& result) -> bool {
+        int parsed = 0;
+        for (const char digit : value) {
+            if (digit < '0' || digit > '9' || parsed > (INT_MAX - (digit - '0')) / 10) return false;
+            parsed = parsed * 10 + (digit - '0');
+        }
+        result = parsed;
+        return true;
+    };
+
+    int lineNumber = 0;
+    int columnNumber = 0;
+    if (!parseCoordinate(payload.substr(0, separator), lineNumber) ||
+        !parseCoordinate(payload.substr(separator + 1), columnNumber)) {
+        writeProtocolResponse("ERROR\n");
+        return true;
+    }
+
+    HWND sci = currentScintilla();
+    if (!sci || lineNumber >= SendMessageW(sci, SCI_GETLINECOUNT_LOCAL, 0, 0)) {
+        writeProtocolResponse("ERROR\n");
+        return true;
+    }
+
+    const LRESULT position = SendMessageW(sci, SCI_FINDCOLUMN_LOCAL,
+                                           static_cast<WPARAM>(lineNumber),
+                                           static_cast<LPARAM>(columnNumber));
+    if (position < 0) {
+        writeProtocolResponse("ERROR\n");
+        return true;
+    }
+    SendMessageW(sci, SCI_GOTOPOS_LOCAL, static_cast<WPARAM>(position), 0);
+    g_scriptSetCursor.store(true);
+    writeProtocolResponse("OK\n");
+    return true;
+}
+
+static bool handleGetScrollLineProtocolLine(const std::string& line)
+{
+    static const std::string prefix = "\x1eNPPMENUSCRIPTS_GETSCROLLLINE:";
+    if (line != prefix) return false;
+
+    HWND sci = currentScintilla();
+    if (!sci) {
+        writeProtocolResponse("ERROR\n");
+        return true;
+    }
+    const LRESULT displayLine = SendMessageW(sci, SCI_GETFIRSTVISIBLELINE_LOCAL, 0, 0);
+    const LRESULT documentLine = SendMessageW(sci, SCI_DOCLINEFROMVISIBLE_LOCAL,
+                                               static_cast<WPARAM>(displayLine), 0);
+    writeProtocolResponse("OK:" + std::to_string(documentLine) + "\n");
+    return true;
+}
+
+static bool handleSetScrollLineProtocolLine(const std::string& line)
+{
+    static const std::string prefix = "\x1eNPPMENUSCRIPTS_SETSCROLLLINE:";
+    if (line.rfind(prefix, 0) != 0) return false;
+
+    const std::string payload = line.substr(prefix.size());
+    if (payload.empty()) {
+        writeProtocolResponse("ERROR\n");
+        return true;
+    }
+    int lineNumber = 0;
+    for (const char digit : payload) {
+        if (digit < '0' || digit > '9' || lineNumber > (INT_MAX - (digit - '0')) / 10) {
+            writeProtocolResponse("ERROR\n");
+            return true;
+        }
+        lineNumber = lineNumber * 10 + (digit - '0');
+    }
+
+    HWND sci = currentScintilla();
+    if (!sci || lineNumber >= SendMessageW(sci, SCI_GETLINECOUNT_LOCAL, 0, 0)) {
+        writeProtocolResponse("ERROR\n");
+        return true;
+    }
+
+    SendMessageW(sci, SCI_ENSUREVISIBLE_LOCAL, static_cast<WPARAM>(lineNumber), 0);
+    if (!SendMessageW(sci, SCI_GETLINEVISIBLE_LOCAL, static_cast<WPARAM>(lineNumber), 0)) {
+        writeProtocolResponse("ERROR\n");
+        return true;
+    }
+
+    const LRESULT displayLine = SendMessageW(sci, SCI_VISIBLEFROMDOCLINE_LOCAL,
+                                               static_cast<WPARAM>(lineNumber), 0);
+    if (displayLine < 0) {
+        writeProtocolResponse("ERROR\n");
+        return true;
+    }
+    SendMessageW(sci, SCI_SETFIRSTVISIBLELINE_LOCAL, static_cast<WPARAM>(displayLine), 0);
+    writeProtocolResponse("OK\n");
+    return true;
+}
+
 static bool handleProtocolLine(const std::string& line)
 {
-    static const std::string prefix = "\x1eNPPNODE_ALERT:";
+    static const std::string prefix = "\x1eNPPMENUSCRIPTS_ALERT:";
     if (line.rfind(prefix, 0) != 0) return false;
 
     const std::string payload = line.substr(prefix.size());
@@ -1727,7 +2598,7 @@ static bool dispatchProtocolLineToUi(const std::string& line)
     auto request = std::make_shared<ProtocolDispatchRequest>();
     request->line = line;
     auto* holder = new std::shared_ptr<ProtocolDispatchRequest>(request);
-    if (!PostMessageW(g_hotkeyWnd, WM_NPPNODE_PROTOCOL, 0, reinterpret_cast<LPARAM>(holder))) {
+    if (!PostMessageW(g_hotkeyWnd, WM_NPPMENUSCRIPTS_PROTOCOL, 0, reinterpret_cast<LPARAM>(holder))) {
         delete holder;
         return false;
     }
@@ -1744,11 +2615,8 @@ static void reportHelperApiMismatch()
 {
     if (g_helperApiMismatchReported.exchange(true)) return;
 
-    MessageBoxW(g_nppData._nppHandle,
-                L"menu-helper.js is incompatible with the currently loaded NppNodeJS.dll.\r\n\r\n"
-                L"Copy the matching menu-helper.js from Notepad++\\plugins\\NppNodeJS "
-                L"to the parent directory of script_folder, then run the script again.",
-                L"NppNodeJS - Incompatible Helper API", MB_OK | MB_ICONERROR);
+    MessageBoxW(g_nppData._nppHandle, tr("HelperIncompatible").c_str(),
+                L"NppMenuScripts - Incompatible Helper API", MB_OK | MB_ICONERROR);
 
     std::lock_guard<std::mutex> lock(g_processHandleMutex);
     if (g_processHandle) TerminateProcess(g_processHandle, ERROR_REVISION_MISMATCH);
@@ -1768,13 +2636,12 @@ static bool handleHelperApiCheckLine(const std::string& line)
     return true;
 }
 
-static bool postOutputMessage(const std::wstring& text)
+static bool postOutputMessage(const std::wstring& text, bool isStderr = false)
 {
     if (!g_hotkeyWnd) return false;
     auto* payload = new std::wstring(text);
-    g_outputMessagesPending.fetch_add(1);
-    if (!PostMessageW(g_hotkeyWnd, WM_NPPNODE_OUTPUT, 0, reinterpret_cast<LPARAM>(payload))) {
-        g_outputMessagesPending.fetch_sub(1);
+    if (!PostMessageW(g_hotkeyWnd, WM_NPPMENUSCRIPTS_OUTPUT, isStderr ? 1 : 0,
+                      reinterpret_cast<LPARAM>(payload))) {
         delete payload;
         return false;
     }
@@ -1785,65 +2652,165 @@ static void finishFailedLaunch(const std::wstring& message)
 {
     const bool outputPosted = postOutputMessage(message);
     g_processRunning.store(false);
-    const BOOL runStatePosted = g_hotkeyWnd
-        ? PostMessageW(g_hotkeyWnd, WM_NPPNODE_RUNSTATE, 0, 0) : FALSE;
+    const bool runStatePosted = postRunStatus(tr("ScriptFailed"));
     debugLog(L"finishFailedLaunch outputPosted=" + std::to_wstring(outputPosted) +
              L" runStatePosted=" + std::to_wstring(runStatePosted));
 }
 
-static void readPipe(HANDLE pipe, const std::shared_ptr<std::atomic<bool>>& hadOutput)
+static void processPipeWide(PipeReaderState& state,
+                            const std::shared_ptr<std::atomic<bool>>& hadOutput,
+                            const std::wstring& text)
 {
-    debugLog(L"readPipe start pipe=" + hexPtr(pipe));
-    Utf8StreamDecoder decoder;
-    std::string protocolPending;
-    char buffer[8192];
-    DWORD read = 0;
-
-    auto emitNormal = [&](const std::wstring& text) {
-        if (text.empty()) return;
-        hadOutput->store(true);
-        const bool posted = postOutputMessage(text);
-        debugLog(L"readPipe emit wchar=" + std::to_wstring(text.size()) + L" PostMessage=" + std::to_wstring(posted));
-    };
-
-    auto processWide = [&](const std::wstring& text) {
-        if (text.empty()) return;
-        const std::string utf8 = debugWideToUtf8(text);
-        protocolPending.append(utf8);
-        size_t pos = 0;
-        for (;;) {
-            const size_t nl = protocolPending.find('\n', pos);
-            if (nl == std::string::npos) break;
-            std::string line = protocolPending.substr(pos, nl - pos);
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            const bool protocolCandidate =
-                line.rfind("\x1eNPPNODE_", 0) == 0;
-            if (protocolCandidate) {
-                if (!dispatchProtocolLineToUi(line)) {
-                    // During shutdown the Node process is terminated and no
-                    // protocol response is needed. Otherwise show malformed
-                    // or unknown protocol lines as normal output.
-                    if (!g_shuttingDown.load())
-                        emitNormal(utf8ToWide(line.c_str()) + L"\n");
-                }
-            } else {
-                emitNormal(utf8ToWide(line.c_str()) + L"\n");
-            }
-            pos = nl + 1;
-        }
-        if (pos != 0) protocolPending.erase(0, pos);
-    };
-
+    if (text.empty()) return;
+    const std::string utf8 = debugWideToUtf8(text);
+    state.protocolPending.append(utf8);
+    size_t pos = 0;
     for (;;) {
-        if (!ReadFile(pipe, buffer, sizeof(buffer), &read, nullptr) || read == 0) break;
-        decoder.feed(buffer, read, processWide);
+        const size_t nl = state.protocolPending.find('\n', pos);
+        if (nl == std::string::npos) break;
+        std::string line = state.protocolPending.substr(pos, nl - pos);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const bool protocolCandidate = line.rfind("\x1eNPPMENUSCRIPTS_", 0) == 0;
+        if (protocolCandidate) {
+            if (!dispatchProtocolLineToUi(line) && !g_shuttingDown.load()) {
+                const bool posted = postOutputMessage(utf8ToWide(line.c_str()) + L"\n",
+                                                      state.isStderr);
+                hadOutput->store(true);
+                debugLog(L"readPipes emitted malformed protocol line PostMessage=" +
+                         std::to_wstring(posted));
+            }
+        } else {
+            const bool posted = postOutputMessage(utf8ToWide(line.c_str()) + L"\n",
+                                                  state.isStderr);
+            hadOutput->store(true);
+            debugLog(L"readPipes emitted wchar=" + std::to_wstring(line.size()) +
+                     L" PostMessage=" + std::to_wstring(posted) +
+                     L" stderr=" + std::to_wstring(state.isStderr));
+        }
+        pos = nl + 1;
     }
-    decoder.finish(processWide);
-    if (!protocolPending.empty()) {
-        emitNormal(utf8ToWide(protocolPending.c_str()));
+    if (pos != 0) state.protocolPending.erase(0, pos);
+}
+
+static void processPipeBytes(PipeReaderState& state,
+                             const std::shared_ptr<std::atomic<bool>>& hadOutput,
+                             const char* data, size_t size)
+{
+    state.decoder.feed(data, size, [&](const std::wstring& text) {
+        processPipeWide(state, hadOutput, text);
+    });
+}
+
+static bool emitNextPipeLine(PipeReaderState& state,
+                             const std::shared_ptr<std::atomic<bool>>& hadOutput)
+{
+    const size_t newline = state.rawPending.find('\n');
+    if (newline == std::string::npos) return false;
+    const size_t lineSize = newline + 1;
+    processPipeBytes(state, hadOutput, state.rawPending.data(), lineSize);
+    state.rawPending.erase(0, lineSize);
+    return true;
+}
+
+static void finishPipe(PipeReaderState& state,
+                       const std::shared_ptr<std::atomic<bool>>& hadOutput)
+{
+    while (emitNextPipeLine(state, hadOutput)) {}
+    if (!state.rawPending.empty()) {
+        processPipeBytes(state, hadOutput, state.rawPending.data(), state.rawPending.size());
+        state.rawPending.clear();
     }
-    CloseHandle(pipe);
-    debugLog(L"readPipe end");
+    state.decoder.finish([&](const std::wstring& text) {
+        processPipeWide(state, hadOutput, text);
+    });
+    if (!state.protocolPending.empty()) {
+        const bool posted = postOutputMessage(utf8ToWide(state.protocolPending.c_str()),
+                                              state.isStderr);
+        hadOutput->store(true);
+        debugLog(L"readPipes emitted trailing text PostMessage=" + std::to_wstring(posted));
+        state.protocolPending.clear();
+    }
+}
+
+static void readPipes(HANDLE stdoutPipe, HANDLE stderrPipe,
+                      const std::shared_ptr<std::atomic<bool>>& hadOutput)
+{
+    PipeReaderState streams[2];
+    streams[0].pipe = stdoutPipe;
+    streams[0].isStderr = false;
+    streams[1].pipe = stderrPipe;
+    streams[1].isStderr = true;
+    debugLog(L"readPipes start stdout=" + hexPtr(stdoutPipe) +
+             L" stderr=" + hexPtr(stderrPipe));
+
+    char buffer[8192];
+    size_t nextStream = 0;
+    bool deferFirstStderr = true;
+    auto hasCompleteLine = [](const PipeReaderState& state) {
+        return state.rawPending.find('\n') != std::string::npos;
+    };
+    while (streams[0].open || streams[1].open ||
+           hasCompleteLine(streams[0]) || hasCompleteLine(streams[1])) {
+        bool madeProgress = false;
+        for (size_t offset = 0; offset < 2; ++offset) {
+            PipeReaderState& state = streams[offset];
+            if (!state.open) continue;
+
+            DWORD available = 0;
+            if (!PeekNamedPipe(state.pipe, nullptr, 0, nullptr, &available, nullptr)) {
+                const DWORD error = GetLastError();
+                debugLog(L"readPipes pipe closed error=" + std::to_wstring(error) +
+                         L" stderr=" + std::to_wstring(state.isStderr));
+                CloseHandle(state.pipe);
+                state.pipe = nullptr;
+                state.open = false;
+                madeProgress = true;
+                continue;
+            }
+            if (available == 0) continue;
+
+            DWORD bytesRead = 0;
+            const DWORD requestSize = std::min<DWORD>(available, sizeof(buffer));
+            if (!ReadFile(state.pipe, buffer, requestSize, &bytesRead, nullptr) || bytesRead == 0) {
+                const DWORD error = GetLastError();
+                debugLog(L"readPipes ReadFile ended error=" + std::to_wstring(error) +
+                         L" stderr=" + std::to_wstring(state.isStderr));
+                CloseHandle(state.pipe);
+                state.pipe = nullptr;
+                state.open = false;
+                madeProgress = true;
+                continue;
+            }
+
+            state.rawPending.append(buffer, bytesRead);
+            madeProgress = true;
+        }
+
+        const bool stdoutReady = hasCompleteLine(streams[0]);
+        const bool stderrReady = hasCompleteLine(streams[1]);
+        if (stdoutReady && stderrReady) {
+            emitNextPipeLine(streams[nextStream], hadOutput);
+            nextStream = 1 - nextStream;
+            deferFirstStderr = false;
+            madeProgress = true;
+        } else if (stdoutReady) {
+            emitNextPipeLine(streams[0], hadOutput);
+            nextStream = 1;
+            madeProgress = true;
+        } else if (stderrReady) {
+            if (deferFirstStderr) {
+                deferFirstStderr = false;
+            } else {
+                emitNextPipeLine(streams[1], hadOutput);
+                nextStream = 0;
+                madeProgress = true;
+            }
+        }
+        if (!madeProgress) Sleep(1);
+    }
+    finishPipe(streams[0], hadOutput);
+    finishPipe(streams[1], hadOutput);
+    debugLog(L"readPipes end");
 }
 
 static std::wstring getCurrentFilePath()
@@ -1852,7 +2819,12 @@ static std::wstring getCurrentFilePath()
 
     const UINT_PTR bufferId = static_cast<UINT_PTR>(SendMessageW(
         g_nppData._nppHandle, NPPM_GETCURRENTBUFFERID_LOCAL, 0, 0));
-    if (!bufferId) return L"";
+    return getFullPathFromBufferId(bufferId);
+}
+
+static std::wstring getFullPathFromBufferId(UINT_PTR bufferId)
+{
+    if (!g_nppData._nppHandle || !bufferId) return L"";
 
     const LRESULT length = SendMessageW(
         g_nppData._nppHandle, NPPM_GETFULLPATHFROMBUFFERID_LOCAL,
@@ -1866,6 +2838,34 @@ static std::wstring getCurrentFilePath()
     if (copied < 0) return L"";
     path.resize(static_cast<size_t>(copied));
     return path;
+}
+
+static std::vector<UINT_PTR> getOpenBufferIds()
+{
+    std::vector<UINT_PTR> bufferIds;
+    if (!g_nppData._nppHandle) return bufferIds;
+
+    const int countTypes[] = {PRIMARY_VIEW, SECOND_VIEW};
+    const int viewIds[] = {MAIN_VIEW, SUB_VIEW};
+    for (size_t i = 0; i < std::size(countTypes); ++i) {
+        const LRESULT count = SendMessageW(g_nppData._nppHandle, NPPM_GETNBOPENFILES,
+                                           0, static_cast<LPARAM>(countTypes[i]));
+        debugLog(L"open-file enumeration countType=" + std::to_wstring(countTypes[i]) +
+                 L" view=" + std::to_wstring(viewIds[i]) +
+                 L" count=" + std::to_wstring(count));
+        for (LRESULT index = 0; index < count; ++index) {
+            const UINT_PTR bufferId = static_cast<UINT_PTR>(SendMessageW(
+                g_nppData._nppHandle, NPPM_GETBUFFERIDFROMPOS,
+                static_cast<WPARAM>(index), static_cast<LPARAM>(viewIds[i])));
+            if (bufferId) {
+                bufferIds.push_back(bufferId);
+                debugLog(L"open-file enumeration index=" + std::to_wstring(index) +
+                         L" bufferId=" + std::to_wstring(bufferId) +
+                         L" path='" + getFullPathFromBufferId(bufferId) + L"'");
+            }
+        }
+    }
+    return bufferIds;
 }
 
 static std::pair<long, long> getCurrentCursor()
@@ -1923,19 +2923,39 @@ static std::wstring quoteCommandArg(const std::wstring& arg)
     return out;
 }
 
-static std::vector<wchar_t> makeEnvironmentBlock(const std::wstring& menuTitle)
+static std::vector<wchar_t> makeEnvironmentBlock(const std::wstring& menuTitle, bool isPython)
 {
     std::vector<std::wstring> entries;
+    std::wstring existingPythonPath;
+    if (isPython) {
+        const DWORD needed = GetEnvironmentVariableW(L"PYTHONPATH", nullptr, 0);
+        if (needed > 1) {
+            existingPythonPath.resize(needed, L'\0');
+            const DWORD copied = GetEnvironmentVariableW(L"PYTHONPATH", existingPythonPath.data(), needed);
+            if (copied > 0 && copied < needed) existingPythonPath.resize(copied);
+            else existingPythonPath.clear();
+        }
+    }
     LPWCH env = GetEnvironmentStringsW();
     if (env) {
         for (LPWCH p = env; *p; p += std::wcslen(p) + 1) {
             const std::wstring entry(p);
-            if (_wcsnicmp(entry.c_str(), L"NPPNODE_MENU_TITLE=", 19) == 0) continue;
+            if (_wcsnicmp(entry.c_str(), L"NPPMENUSCRIPTS_MENU_TITLE=", 26) == 0) continue;
+            if (_wcsnicmp(entry.c_str(), L"NPPMENUSCRIPTS_MENU_TITLE_B64=", 30) == 0) continue;
+            if (_wcsnicmp(entry.c_str(), L"NPPMENUSCRIPTS_HELPER_API_ID=", 29) == 0) continue;
+            if (isPython && _wcsnicmp(entry.c_str(), L"PYTHONPATH=", 11) == 0) continue;
             entries.push_back(entry);
         }
         FreeEnvironmentStringsW(env);
     }
-    entries.push_back(L"NPPNODE_MENU_TITLE=" + menuTitle);
+    entries.push_back(L"NPPMENUSCRIPTS_MENU_TITLE=" + menuTitle);
+    entries.push_back(L"NPPMENUSCRIPTS_MENU_TITLE_B64=" + utf8ToWide(encodeBase64(debugWideToUtf8(menuTitle)).c_str()));
+    entries.push_back(L"NPPMENUSCRIPTS_HELPER_API_ID=" + std::to_wstring(HELPER_API_ID));
+    if (isPython) {
+        std::wstring pythonPath = moduleDirectory();
+        if (!existingPythonPath.empty()) pythonPath += L";" + existingPythonPath;
+        entries.push_back(L"PYTHONPATH=" + pythonPath);
+    }
     std::sort(entries.begin(), entries.end(), [](const std::wstring& a, const std::wstring& b) {
         return _wcsicmp(a.c_str(), b.c_str()) < 0;
     });
@@ -1958,24 +2978,35 @@ static void runNodeScript(const std::wstring& path, const std::wstring& menuTitl
     debugLog(L"runNodeScript path=" + path);
     std::lock_guard<std::mutex> lock(g_processMutex);
     if (g_processRunning.load()) {
-        MessageBoxW(g_nppData._nppHandle, L"A Node.js script is already running.",
-                    L"NppNodeJS", MB_OK | MB_ICONWARNING);
+        MessageBoxW(g_nppData._nppHandle, tr("ScriptAlreadyRunning").c_str(),
+                    L"NppMenuScripts", MB_OK | MB_ICONWARNING);
         return;
     }
+    setOutputPaneTitle(g_outputDefaultTitle);
     g_outputShownForRun = false;
-    g_outputRunningTitle = false;
-    g_outputFinishPending = false;
-    g_outputMessagesPending.store(0);
+    g_stdoutAnsiColor = -1;
+    g_stderrAnsiColor = -1;
     if (g_outputPane) {
         clearOutputPane();
         applyOutputStyle();
     }
+    g_scriptSetStatusBarText.store(false);
+    g_scriptSetCursor.store(false);
+    const size_t slash = path.find_last_of(L"\\/");
+    const std::wstring scriptName = slash == std::wstring::npos ? path : path.substr(slash + 1);
+    setNppStatusText(trFormat("ScriptRunning", {{L"{name}", scriptName}}));
     g_processRunning.store(true);
+    setOutputCaretVisible(false);
     g_helperApiVerified.store(false);
     g_helperApiMismatchReported.store(false);
 
     if (g_processThread.joinable()) g_processThread.join();
-    g_processThread = std::thread([path, menuTitle]() {
+    std::wstring lowerPath = path;
+    std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), ::towlower);
+    const bool isPerl = lowerPath.size() >= 3 && lowerPath.rfind(L".pl") == lowerPath.size() - 3;
+    const bool isPython = lowerPath.size() >= 3 && lowerPath.rfind(L".py") == lowerPath.size() - 3;
+    const std::wstring scriptFolder = g_scriptFolder;
+    g_processThread = std::thread([path, menuTitle, scriptFolder, isPerl, isPython]() {
         SECURITY_ATTRIBUTES sa{};
         sa.nLength = sizeof(sa);
         sa.bInheritHandle = TRUE;
@@ -1990,19 +3021,29 @@ static void runNodeScript(const std::wstring& path, const std::wstring& menuTitl
             if (inRead) CloseHandle(inRead); if (inWrite) CloseHandle(inWrite);
             if (outRead) CloseHandle(outRead); if (outWrite) CloseHandle(outWrite);
             if (errRead) CloseHandle(errRead); if (errWrite) CloseHandle(errWrite);
-            finishFailedLaunch(L"[NppNodeJS] Unable to create stdout/stderr pipes.\r\n");
+            finishFailedLaunch(tr("UnableCreatePipes") + L"\r\n");
             return;
         }
         SetHandleInformation(inWrite, HANDLE_FLAG_INHERIT, 0);
         SetHandleInformation(outRead, HANDLE_FLAG_INHERIT, 0);
         SetHandleInformation(errRead, HANDLE_FLAG_INHERIT, 0);
 
-        const std::string menuTitleUtf8 = debugWideToUtf8(menuTitle);
-        const std::string menuTitleBase64 = encodeBase64(menuTitleUtf8);
-        std::wstring command = L"node.exe " + quoteCommandArg(path) +
-            L" --nppnode-menu-title-b64 " + quoteCommandArg(utf8ToWide(menuTitleBase64.c_str())) +
-            L" --nppnode-helper-api-id " + quoteCommandArg(std::to_wstring(HELPER_API_ID));
-        std::vector<wchar_t> environment = makeEnvironmentBlock(menuTitle);
+        std::wstring command;
+        if (isPerl) {
+            command = L"perl.exe -I " + quoteCommandArg(directoryName(scriptFolder)) +
+                L" -I " + quoteCommandArg(moduleDirectory()) +
+                L" -e " + quoteCommandArg(L"$|=1; $0=shift @ARGV; do $0; die $@ if $@;") +
+                L" " + quoteCommandArg(path);
+        } else if (isPython) {
+            command = L"py.exe -u -X utf8 " + quoteCommandArg(path);
+        } else {
+            const std::string menuTitleUtf8 = debugWideToUtf8(menuTitle);
+            const std::string menuTitleBase64 = encodeBase64(menuTitleUtf8);
+            command = L"node.exe " + quoteCommandArg(path) +
+                L" --nppmenuscripts-menu-title-b64 " + quoteCommandArg(utf8ToWide(menuTitleBase64.c_str())) +
+                L" --nppmenuscripts-helper-api-id " + quoteCommandArg(std::to_wstring(HELPER_API_ID));
+        }
+        std::vector<wchar_t> environment = makeEnvironmentBlock(menuTitle, isPython);
         STARTUPINFOW si{};
         si.cb = sizeof(si);
         si.dwFlags = STARTF_USESTDHANDLES;
@@ -2023,7 +3064,9 @@ static void runNodeScript(const std::wstring& path, const std::wstring& menuTitl
         if (!ok) {
             const DWORD err = GetLastError();
             debugLog(L"CreateProcess FAILED error=" + std::to_wstring(err));
-            std::wstring msg = L"[NppNodeJS] Unable to start node.exe. Error code: " + std::to_wstring(err) + L"\r\n";
+            const char* errorKey = isPerl ? "UnableStartPerl" : isPython ? "UnableStartPython" : "UnableStartNode";
+            std::wstring msg = trFormat(errorKey,
+                                        {{L"{error}", std::to_wstring(err)}});
             CloseHandle(inWrite);
             CloseHandle(outRead); CloseHandle(errRead);
             finishFailedLaunch(msg);
@@ -2040,11 +3083,9 @@ static void runNodeScript(const std::wstring& path, const std::wstring& menuTitl
             g_stdinWrite = inWrite;
         }
         auto hadOutput = std::make_shared<std::atomic<bool>>(false);
-        std::thread outThread(readPipe, outRead, hadOutput);
-        std::thread errThread(readPipe, errRead, hadOutput);
+        std::thread outputThread(readPipes, outRead, errRead, hadOutput);
         WaitForSingleObject(pi.hProcess, INFINITE);
-        outThread.join();
-        errThread.join();
+        outputThread.join();
         {
             std::lock_guard<std::mutex> lock(g_stdinMutex);
             if (g_stdinWrite) {
@@ -2057,11 +3098,18 @@ static void runNodeScript(const std::wstring& path, const std::wstring& menuTitl
             if (g_processHandle == pi.hProcess) g_processHandle = nullptr;
         }
         CloseHandle(pi.hThread);
+        DWORD exitCode = 1;
+        GetExitCodeProcess(pi.hProcess, &exitCode);
         CloseHandle(pi.hProcess);
-        debugLog(L"process finished hadOutput=" + std::to_wstring(hadOutput->load()));
+        debugLog(L"process finished exitCode=" + std::to_wstring(exitCode) +
+                 L" hadOutput=" + std::to_wstring(hadOutput->load()));
+        const bool preserveScriptStatus = exitCode == 0 && g_scriptSetStatusBarText.load();
+        const bool restoreEditorFocus = g_scriptSetCursor.exchange(false);
         g_processRunning.store(false);
-        if (g_hotkeyWnd)
-            PostMessageW(g_hotkeyWnd, WM_NPPNODE_RUNSTATE, 0, 0);
+        if (preserveScriptStatus)
+            postRunStatus(L"", restoreEditorFocus);
+        else
+            postRunStatus(tr(exitCode == 0 ? "ScriptCompleted" : "ScriptFailed"), restoreEditorFocus);
     });
 }
 
@@ -2087,9 +3135,15 @@ static bool createScriptTemplate(const std::wstring& scriptPath)
         return value;
     }();
     const bool isMjs = lower.size() >= 4 && lower.rfind(L".mjs") == lower.size() - 4;
-    const std::string text = isMjs
-        ? "// NppNodeJS API:\n// https://github.com/seantw/NppNodeJS\n\nimport npp from '#menu-helper';\n\nconsole.log('Hello, World!');\n"
-        : "// NppNodeJS API:\n// https://github.com/seantw/NppNodeJS\n\nconst npp = require('#menu-helper');\n\nconsole.log('Hello, World!');\n";
+    const bool isPerl = lower.size() >= 3 && lower.rfind(L".pl") == lower.size() - 3;
+    const bool isPython = lower.size() >= 3 && lower.rfind(L".py") == lower.size() - 3;
+    const std::string text = isPython
+        ? "import menu_helper as npp\n\nprint('Hello from Python')\n"
+        : isPerl
+        ? "use strict;\nuse warnings;\n\nuse MenuHelper ();\n\nprint \"Hello from Perl\\n\";\n"
+        : isMjs
+        ? "// NppMenuScripts API:\n// https://github.com/seantw/NppMenuScripts\n\nimport npp from '#menu-helper';\n\nconsole.log('Hello, World!');\n"
+        : "// NppMenuScripts API:\n// https://github.com/seantw/NppMenuScripts\n\nconst npp = require('#menu-helper');\n\nconsole.log('Hello, World!');\n";
     f.write(text.data(), static_cast<std::streamsize>(text.size()));
     return f.good();
 }
@@ -2104,16 +3158,16 @@ static bool openOrCreateScript(const std::wstring& scriptPath)
     }
 
     const std::wstring fileName = scriptPath.substr(scriptPath.find_last_of(L"\\/") + 1);
-    const std::wstring message = fileName + L" does not exist. Create it?";
+    const std::wstring message = trFormat("CreateScriptPrompt", {{L"{name}", fileName}});
     if (MessageBoxW(g_nppData._nppHandle, message.c_str(),
-                    L"NppNodeJS", MB_YESNO | MB_ICONQUESTION) != IDYES) {
+                    L"NppMenuScripts", MB_YESNO | MB_ICONQUESTION) != IDYES) {
         return false;
     }
 
     if (!createScriptTemplate(scriptPath)) {
         MessageBoxW(g_nppData._nppHandle,
-                    L"Unable to create the script file.",
-                    L"NppNodeJS", MB_OK | MB_ICONERROR);
+                    tr("CreateScriptFailed").c_str(),
+                    L"NppMenuScripts", MB_OK | MB_ICONERROR);
         return false;
     }
 
@@ -2127,11 +3181,49 @@ static void showScriptPath(int id, bool checkCtrlClick = true)
     const int index = id - g_cmdBase;
     if (index < 0 || index >= static_cast<int>(g_scriptPaths.size())) return;
 
-    const std::wstring& scriptPath = g_scriptPaths[static_cast<size_t>(index)];
+    std::wstring scriptPath = g_scriptPaths[static_cast<size_t>(index)];
+    const bool currentFile = isCurrentFileToken(scriptPath);
+
+    if (currentFile) {
+        scriptPath = getCurrentFilePath();
+        if (scriptPath.empty()) {
+            MessageBoxW(g_nppData._nppHandle, tr("CurrentFileUnnamed").c_str(),
+                        L"NppMenuScripts", MB_OK | MB_ICONWARNING);
+            return;
+        }
+        if (!hasScriptExtension(scriptPath)) {
+            const std::wstring message = trFormat("CurrentFileUnsupported", {
+                {L"{extension}", scriptExtension(scriptPath)}});
+            MessageBoxW(g_nppData._nppHandle, message.c_str(), L"NppMenuScripts", MB_OK | MB_ICONWARNING);
+            return;
+        }
+        HWND sci = currentScintilla();
+        if (sci && SendMessageW(sci, SCI_GETMODIFY_LOCAL, 0, 0) != 0) {
+            const int answer = MessageBoxW(g_nppData._nppHandle,
+                tr("CurrentFileModified").c_str(), L"NppMenuScripts",
+                MB_YESNO | MB_ICONQUESTION);
+            if (answer != IDYES) return;
+            SendMessageW(g_nppData._nppHandle, NPPM_SAVECURRENTFILE, 0, 0);
+            if (SendMessageW(sci, SCI_GETMODIFY_LOCAL, 0, 0) != 0) {
+                MessageBoxW(g_nppData._nppHandle, tr("CurrentFileSaveFailed").c_str(),
+                            L"NppMenuScripts", MB_OK | MB_ICONWARNING);
+                return;
+            }
+            // Save As may change the active document's path.
+            scriptPath = getCurrentFilePath();
+            if (scriptPath.empty() || !hasScriptExtension(scriptPath)) {
+                const std::wstring message = scriptPath.empty()
+                    ? tr("CurrentFileUnnamed")
+                    : trFormat("CurrentFileUnsupported", {{L"{extension}", scriptExtension(scriptPath)}});
+                MessageBoxW(g_nppData._nppHandle, message.c_str(), L"NppMenuScripts", MB_OK | MB_ICONWARNING);
+                return;
+            }
+        }
+    }
 
     // Hidden shortcut: Ctrl+click a script menu item opens the script in Notepad++
     // instead of executing it.
-    if (checkCtrlClick && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+    if (!currentFile && checkCtrlClick && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
         openOrCreateScript(scriptPath);
         return;
     }
@@ -2158,14 +3250,31 @@ static LRESULT CALLBACK hotkeyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             showScriptPath(id, false);
             return 0;
         }
-    } else if (msg == WM_NPPNODE_PROTOCOL) {
+    } else if (msg == WM_NPPMENUSCRIPTS_REFRESH_LANGUAGE) {
+        // Notepad++ sends NPPN_NATIVELANGCHANGED while it is refreshing its UI.
+        // Wait until that notification has unwound and the native language API
+        // reports the settled language before updating our menu labels.
+        g_languageRefreshPasses = 0;
+        SetTimer(hwnd, NPPMENUSCRIPTS_LANGUAGE_TIMER, 150, nullptr);
+        return 0;
+    } else if (msg == WM_TIMER && wParam == NPPMENUSCRIPTS_LANGUAGE_TIMER) {
+        KillTimer(hwnd, NPPMENUSCRIPTS_LANGUAGE_TIMER);
+        loadTranslations();
+        g_outputDefaultTitle = tr("OutputPane");
+        if (g_outputDefaultTitle.empty()) g_outputDefaultTitle = L"Output Pane";
+        setOutputPaneTitle(g_outputDefaultTitle);
+        applyTranslatedPluginMenu();
+        if (++g_languageRefreshPasses < 4)
+            SetTimer(hwnd, NPPMENUSCRIPTS_LANGUAGE_TIMER, 300, nullptr);
+        return 0;
+    } else if (msg == WM_NPPMENUSCRIPTS_PROTOCOL) {
         auto* holder = reinterpret_cast<std::shared_ptr<ProtocolDispatchRequest>*>(lParam);
         if (holder) {
             std::shared_ptr<ProtocolDispatchRequest> request = *holder;
             delete holder;
             bool handled = handleHelperApiCheckLine(request->line);
             if (!handled && !g_helperApiVerified.load() &&
-                request->line.rfind("\x1eNPPNODE_", 0) == 0) {
+                request->line.rfind("\x1eNPPMENUSCRIPTS_", 0) == 0) {
                 reportHelperApiMismatch();
                 handled = true;
             }
@@ -2173,8 +3282,19 @@ static LRESULT CALLBACK hotkeyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             if (!handled) handled = handlePromptProtocolLine(request->line);
             if (!handled) handled = handleConfirmProtocolLine(request->line);
             if (!handled) handled = handleGetFileProtocolLine(request->line);
+            if (!handled) handled = handleSaveFileProtocolLine(request->line);
+            if (!handled) handled = handleOpenFileProtocolLine(request->line);
+            if (!handled) handled = handleGetOpenFilesProtocolLine(request->line);
+            if (!handled) handled = handleCloseFileProtocolLine(request->line);
+            if (!handled) handled = handleSetStatusBarTextProtocolLine(request->line);
+            if (!handled) handled = handleSetOutputPaneTitleProtocolLine(request->line);
             if (!handled) handled = handleGetCursorProtocolLine(request->line);
+            if (!handled) handled = handleSetCursorProtocolLine(request->line);
+            if (!handled) handled = handleGetScrollLineProtocolLine(request->line);
+            if (!handled) handled = handleSetScrollLineProtocolLine(request->line);
             if (!handled) handled = handleTextProtocolLine(request->line);
+            if (!handled) handled = handleClipboardProtocolLine(request->line);
+            if (!handled) handled = handleRunMenuCommandProtocolLine(request->line);
             {
                 std::lock_guard<std::mutex> lock(request->mutex);
                 request->handled = handled;
@@ -2183,39 +3303,31 @@ static LRESULT CALLBACK hotkeyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             request->cv.notify_one();
         }
         return 0;
-    } else if (msg == WM_NPPNODE_OUTPUT) {
+    } else if (msg == WM_NPPMENUSCRIPTS_OUTPUT) {
         std::unique_ptr<std::wstring> text(reinterpret_cast<std::wstring*>(lParam));
-        debugLog(L"WM_NPPNODE_OUTPUT received text=" + std::to_wstring(text ? text->size() : 0) +
+        debugLog(L"WM_NPPMENUSCRIPTS_OUTPUT received text=" + std::to_wstring(text ? text->size() : 0) +
                  L" pane=" + hexPtr(g_outputPane) + L" edit=" + hexPtr(g_outputEdit));
         if (text && !text->empty()) {
             if (!g_outputPane && !createOutputPane()) {
-                g_outputMessagesPending.fetch_sub(1);
                 debugLog(L"createOutputPane FAILED from output message");
                 return 0;
             }
-            appendOutput(*text);
+            appendOutput(*text, wParam != 0);
             if (!g_outputShownForRun) {
                 showOutputPane();
                 g_outputShownForRun = true;
             }
-            if (!g_outputRunningTitle)
-                updateOutputPaneTitle(true);
-        }
-        g_outputMessagesPending.fetch_sub(1);
-        if (g_outputFinishPending && g_outputMessagesPending.load() == 0) {
-            g_outputFinishPending = false;
-            if (g_outputRunningTitle)
-                updateOutputPaneTitle(false);
         }
         return 0;
-    } else if (msg == WM_NPPNODE_RUNSTATE) {
-        // The process and both pipe reader threads are finished. Output
-        // messages already queued for the UI are drained before restoring
-        // the original dock title.
-        if (g_outputMessagesPending.load() != 0) {
-            g_outputFinishPending = true;
-        } else if (g_outputRunningTitle) {
-            updateOutputPaneTitle(false);
+    } else if (msg == WM_NPPMENUSCRIPTS_RUNSTATE) {
+        std::unique_ptr<RunStatePayload> state(reinterpret_cast<RunStatePayload*>(lParam));
+        if (state) {
+            setOutputCaretVisible(!g_processRunning.load());
+            if (!state->text.empty()) setNppStatusText(state->text);
+            if (state->restoreEditorFocus) {
+                HWND sci = currentScintilla();
+                if (sci && IsWindow(sci)) SetFocus(sci);
+            }
         }
         return 0;
     }
@@ -2237,30 +3349,243 @@ static bool addMenuItem(HMENU menu, const std::wstring& title, const std::wstrin
     return true;
 }
 
-static bool addJsonMenu(HMENU menu, cJSON* obj, const std::wstring& folder)
+static bool hasScriptExtension(const std::wstring& path)
 {
-    if (!cJSON_IsObject(obj)) return false;
-    for (cJSON* item = obj->child; item; item = item->next) {
-        if (!item->string) continue;
-        const std::wstring title = utf8ToWide(item->string);
-        if (cJSON_IsString(item)) {
-            std::wstring file = utf8ToWide(item->valuestring);
-            std::wstring lower = file;
-            std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
-            const bool validExt = lower.size() >= 3 &&
-                (lower.rfind(L".js") == lower.size() - 3 ||
-                 (lower.size() >= 4 && lower.rfind(L".mjs") == lower.size() - 4));
-            if (!validExt) continue;
-            addMenuItem(menu, title, joinPath(folder, file));
-        } else if (cJSON_IsObject(item)) {
-            HMENU sub = CreatePopupMenu();
-            if (!sub) return false;
-            if (!addJsonMenu(sub, item, folder)) { DestroyMenu(sub); return false; }
-            if (!AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(sub), title.c_str())) {
-                DestroyMenu(sub); return false;
-            }
+    std::wstring lower = path;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
+    return (lower.size() >= 3 && lower.rfind(L".js") == lower.size() - 3) ||
+           (lower.size() >= 4 && lower.rfind(L".mjs") == lower.size() - 4) ||
+           (lower.size() >= 3 && lower.rfind(L".pl") == lower.size() - 3) ||
+           (lower.size() >= 3 && lower.rfind(L".py") == lower.size() - 3);
+}
+
+static constexpr wchar_t CURRENT_FILE_TOKEN[] = L"{CURRENT_FILE}";
+
+static bool isCurrentFileToken(const std::wstring& value)
+{
+    return value == CURRENT_FILE_TOKEN;
+}
+
+static std::wstring scriptExtension(const std::wstring& path)
+{
+    const size_t slash = path.find_last_of(L"\\/");
+    const size_t dot = path.find_last_of(L'.');
+    if (dot == std::wstring::npos || (slash != std::wstring::npos && dot < slash)) return L"(none)";
+    return path.substr(dot);
+}
+
+static HBITMAP createToolbarBitmap(HICON icon)
+{
+    const int cx = GetSystemMetrics(SM_CXSMICON);
+    const int cy = GetSystemMetrics(SM_CYSMICON);
+    HDC screen = GetDC(nullptr);
+    if (!screen) return nullptr;
+    HBITMAP bitmap = CreateCompatibleBitmap(screen, cx, cy);
+    HDC memory = bitmap ? CreateCompatibleDC(screen) : nullptr;
+    if (bitmap && memory) {
+        HGDIOBJ old = SelectObject(memory, bitmap);
+        RECT area{0, 0, cx, cy};
+        HBRUSH background = CreateSolidBrush(RGB(255, 0, 255));
+        FillRect(memory, &area, background);
+        DeleteObject(background);
+        DrawIconEx(memory, 0, 0, icon, cx, cy, 0, nullptr, DI_NORMAL);
+        SelectObject(memory, old);
+    } else if (bitmap) {
+        DeleteObject(bitmap);
+        bitmap = nullptr;
+    }
+    if (memory) DeleteDC(memory);
+    ReleaseDC(nullptr, screen);
+    return bitmap;
+}
+
+static bool loadToolbarIcon(const std::wstring& path, toolbarIconsWithDarkMode& handles)
+{
+    HICON icon = static_cast<HICON>(LoadImageW(nullptr, path.c_str(), IMAGE_ICON, 0, 0,
+                                               LR_LOADFROMFILE | LR_DEFAULTSIZE));
+    if (!icon) return false;
+    HICON darkIcon = CopyIcon(icon);
+    HBITMAP bitmap = createToolbarBitmap(icon);
+    if (!darkIcon || !bitmap) {
+        DestroyIcon(icon);
+        if (darkIcon) DestroyIcon(darkIcon);
+        if (bitmap) DeleteObject(bitmap);
+        return false;
+    }
+    handles.hToolbarBmp = bitmap;
+    handles.hToolbarIcon = icon;
+    handles.hToolbarIconDarkMode = darkIcon;
+    return true;
+}
+
+static void runToolbarScript(size_t index)
+{
+    const size_t pathIndex = static_cast<size_t>(g_menuScriptCount) + index;
+    if (pathIndex < g_scriptPaths.size())
+        showScriptPath(g_cmdBase + static_cast<int>(pathIndex));
+}
+
+static void organizeToolbarCommandsInPluginMenu()
+{
+    HMENU pluginsMenu = reinterpret_cast<HMENU>(
+        SendMessageW(g_nppData._nppHandle, NPPM_GETMENUHANDLE, NPPPLUGINMENU, 0));
+    if (!pluginsMenu || g_toolbarScriptFiles.empty()) return;
+
+    HMENU pluginMenu = nullptr;
+    const int count = GetMenuItemCount(pluginsMenu);
+    for (int i = 0; i < count; ++i) {
+        wchar_t label[128] = {};
+        GetMenuStringW(pluginsMenu, static_cast<UINT>(i), label,
+                       static_cast<int>(std::size(label)), MF_BYPOSITION);
+        std::wstring normalized = label;
+        normalized.erase(std::remove(normalized.begin(), normalized.end(), L'&'), normalized.end());
+        if (normalized == PLUGIN_NAME) {
+            MENUITEMINFOW menuItem{};
+            menuItem.cbSize = sizeof(menuItem);
+            menuItem.fMask = MIIM_SUBMENU;
+            if (GetMenuItemInfoW(pluginsMenu, static_cast<UINT>(i), TRUE, &menuItem))
+                pluginMenu = menuItem.hSubMenu;
+            break;
         }
     }
+    if (!pluginMenu) return;
+
+    const size_t baseCount = sizeof(g_funcItems) / sizeof(g_funcItems[0]);
+    HMENU toolbarMenu = CreatePopupMenu();
+    if (!toolbarMenu) return;
+    for (size_t i = 0; i < g_toolbarScriptFiles.size(); ++i) {
+        const UINT commandId = static_cast<UINT>(g_allFuncItems[baseCount + i]._cmdID);
+        if (!AppendMenuW(toolbarMenu, MF_STRING, commandId, g_toolbarTitles[i].c_str())) {
+            DestroyMenu(toolbarMenu);
+            debugLog(L"Could not build NppMenuScripts Toolbar submenu");
+            return;
+        }
+    }
+
+    const UINT setPathCommandId = static_cast<UINT>(g_allFuncItems[3]._cmdID);
+    int insertionPosition = GetMenuItemCount(pluginMenu);
+    for (int i = 0; i < GetMenuItemCount(pluginMenu); ++i) {
+        MENUITEMINFOW menuItem{};
+        menuItem.cbSize = sizeof(menuItem);
+        menuItem.fMask = MIIM_ID;
+        if (GetMenuItemInfoW(pluginMenu, static_cast<UINT>(i), TRUE, &menuItem) &&
+            menuItem.wID == setPathCommandId) {
+            insertionPosition = i + 1;
+            break;
+        }
+    }
+
+    // Remove the flat plugin-menu entries before attaching their command IDs
+    // below the new submenu. RemoveMenu may also find matching IDs in attached
+    // submenus, so doing this after insertion can empty the Toolbar submenu.
+    for (size_t i = 0; i < g_toolbarScriptFiles.size(); ++i) {
+        const UINT commandId = static_cast<UINT>(g_allFuncItems[baseCount + i]._cmdID);
+        RemoveMenu(pluginMenu, commandId, MF_BYCOMMAND);
+    }
+
+    if (!InsertMenuW(pluginMenu, static_cast<UINT>(insertionPosition),
+                     MF_BYPOSITION | MF_POPUP,
+                     reinterpret_cast<UINT_PTR>(toolbarMenu), tr("Toolbar").c_str())) {
+        for (size_t i = 0; i < g_toolbarScriptFiles.size(); ++i) {
+            const UINT commandId = static_cast<UINT>(g_allFuncItems[baseCount + i]._cmdID);
+            AppendMenuW(pluginMenu, MF_STRING, commandId, g_toolbarTitles[i].c_str());
+        }
+        DestroyMenu(toolbarMenu);
+        debugLog(L"Could not insert NppMenuScripts Toolbar submenu; restored toolbar commands at plugin-menu root");
+        return;
+    }
+    DrawMenuBar(g_nppData._nppHandle);
+}
+
+template <size_t Index>
+static void toolbarCommand()
+{
+    runToolbarScript(Index);
+}
+
+template <size_t... Indices>
+static std::vector<void (*)()> makeToolbarCallbacks(std::index_sequence<Indices...>)
+{
+    return { &toolbarCommand<Indices>... };
+}
+
+static constexpr size_t MAX_TOOLBAR_ITEMS = 32;
+
+static constexpr unsigned int MAX_MENU_NESTING = 16;
+
+static bool addJsonMenu(HMENU menu, cJSON* obj, const std::wstring& folder, unsigned int depth = 0)
+{
+    if (!cJSON_IsArray(obj) || depth > MAX_MENU_NESTING) return false;
+    for (cJSON* item = obj->child; item; item = item->next) {
+        if (!cJSON_IsObject(item)) return false;
+        if (!item->child) {
+            if (!AppendMenuW(menu, MF_SEPARATOR, 0, nullptr)) return false;
+            continue;
+        }
+        cJSON* titleItem = cJSON_GetObjectItemCaseSensitive(item, "title");
+        cJSON* scriptItem = cJSON_GetObjectItemCaseSensitive(item, "script");
+        cJSON* subItem = cJSON_GetObjectItemCaseSensitive(item, "sub");
+        if (subItem) {
+            if (!cJSON_IsString(titleItem) || !cJSON_IsArray(subItem) || scriptItem || depth >= MAX_MENU_NESTING)
+                return false;
+            HMENU childMenu = CreatePopupMenu();
+            if (!childMenu || !addJsonMenu(childMenu, subItem, folder, depth + 1)) {
+                if (childMenu) DestroyMenu(childMenu);
+                return false;
+            }
+            if (!AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(childMenu),
+                             utf8ToWide(titleItem->valuestring).c_str())) {
+                DestroyMenu(childMenu);
+                return false;
+            }
+            continue;
+        }
+        const std::wstring script = utf8ToWide(scriptItem ? scriptItem->valuestring : nullptr);
+        if (!cJSON_IsString(titleItem) || !cJSON_IsString(scriptItem) ||
+            (!isCurrentFileToken(script) && !hasScriptExtension(script))) return false;
+        if (!addMenuItem(menu, utf8ToWide(titleItem->valuestring),
+                         isCurrentFileToken(script) ? script : joinPath(folder, script))) return false;
+    }
+    return true;
+}
+
+static bool validMenuItems(cJSON* items, unsigned int depth = 0)
+{
+    if (!cJSON_IsArray(items) || depth > MAX_MENU_NESTING) return false;
+    for (cJSON* item = items->child; item; item = item->next) {
+        if (!cJSON_IsObject(item)) return false;
+        if (!item->child) continue; // Empty object is a separator.
+        cJSON* title = cJSON_GetObjectItemCaseSensitive(item, "title");
+        cJSON* script = cJSON_GetObjectItemCaseSensitive(item, "script");
+        cJSON* sub = cJSON_GetObjectItemCaseSensitive(item, "sub");
+        if (sub) {
+            if (!cJSON_IsString(title) || !cJSON_IsArray(sub) || script || depth >= MAX_MENU_NESTING ||
+                !validMenuItems(sub, depth + 1)) return false;
+            continue;
+        }
+        const std::wstring scriptValue = utf8ToWide(script ? script->valuestring : nullptr);
+        if (!cJSON_IsString(title) || !cJSON_IsString(script) ||
+            (!isCurrentFileToken(scriptValue) && !hasScriptExtension(scriptValue))) return false;
+    }
+    return true;
+}
+
+static int countMenuCommands(cJSON* items)
+{
+    int count = 0;
+    for (cJSON* item = items ? items->child : nullptr; item; item = item->next) {
+        cJSON* sub = cJSON_GetObjectItemCaseSensitive(item, "sub");
+        if (sub) count += countMenuCommands(sub);
+        else if (item->child) ++count;
+    }
+    return count;
+}
+
+static bool validMenuDefinition(cJSON* menu)
+{
+    if (!cJSON_IsObject(menu)) return false;
+    for (cJSON* top = menu->child; top; top = top->next)
+        if (!validMenuItems(top)) return false;
     return true;
 }
 
@@ -2321,7 +3646,8 @@ static bool installMenus(const std::wstring& jsonPath, bool forceRebuild)
     if (g_installed && !forceRebuild) return true;
     const std::wstring jsonText = readUtf8File(jsonPath);
     if (jsonText.empty()) {
-        MessageBoxW(g_nppData._nppHandle, jsonPath.c_str(), L"NppNodeJS - menu.json not found or empty", MB_OK | MB_ICONERROR);
+        const std::wstring message = trFormat("MenuJsonEmpty", {} ) + L"\r\n\r\n" + jsonPath;
+        MessageBoxW(g_nppData._nppHandle, message.c_str(), L"NppMenuScripts", MB_OK | MB_ICONERROR);
         return false;
     }
     std::ifstream f(jsonPath.c_str(), std::ios::binary);
@@ -2331,60 +3657,105 @@ static bool installMenus(const std::wstring& jsonPath, bool forceRebuild)
     cJSON* root = cJSON_Parse(bytes.c_str());
     if (!root) {
         const char* err = cJSON_GetErrorPtr();
-        std::wstring msg = L"JSON parse error: "; msg += utf8ToWide(err ? err : "unknown error");
-        MessageBoxW(g_nppData._nppHandle, msg.c_str(), L"NppNodeJS", MB_OK | MB_ICONERROR); return false;
+        std::wstring msg = trFormat("JsonParseError", {{L"{error}", utf8ToWide(err ? err : "unknown error")}});
+        MessageBoxW(g_nppData._nppHandle, msg.c_str(), L"NppMenuScripts", MB_OK | MB_ICONERROR); return false;
     }
     cJSON* scriptFolderItem = cJSON_GetObjectItemCaseSensitive(root, "script_folder");
-    cJSON* outputTitleItem = cJSON_GetObjectItemCaseSensitive(root, "output_pan_title");
     cJSON* debugItem = cJSON_GetObjectItemCaseSensitive(root, "debug");
     cJSON* menuItem = cJSON_GetObjectItemCaseSensitive(root, "menu");
-    if (!cJSON_IsString(scriptFolderItem) || !cJSON_IsString(outputTitleItem) ||
-        !cJSON_IsObject(menuItem) || (debugItem && !cJSON_IsBool(debugItem))) {
+    cJSON* iconFolderItem = cJSON_GetObjectItemCaseSensitive(root, "icon_folder");
+    cJSON* toolbarItem = cJSON_GetObjectItemCaseSensitive(root, "toolbar");
+    if (!cJSON_IsString(scriptFolderItem) ||
+        !validMenuDefinition(menuItem) || (debugItem && !cJSON_IsBool(debugItem)) ||
+        (iconFolderItem && !cJSON_IsString(iconFolderItem)) ||
+        (toolbarItem && !cJSON_IsArray(toolbarItem))) {
         cJSON_Delete(root);
-        MessageBoxW(g_nppData._nppHandle, L"menu.json must contain string 'script_folder', string 'output_pan_title', and object 'menu'.", L"NppNodeJS", MB_OK | MB_ICONERROR);
+        MessageBoxW(g_nppData._nppHandle, tr("InvalidMenuJson").c_str(), L"NppMenuScripts", MB_OK | MB_ICONERROR);
         return false;
     }
     // Validate the new configuration completely before removing the current menu.
-    // This keeps the existing menu available when Rebuild Menu encounters invalid JSON.
+    // This keeps the existing menu available when Rebuild Menu & Toolbar encounters invalid JSON.
     int itemCount = 0;
-    std::vector<cJSON*> stack{menuItem};
-    while (!stack.empty()) {
-        cJSON* obj = stack.back(); stack.pop_back();
-        for (cJSON* x = obj->child; x; x = x->next) {
-            if (cJSON_IsString(x)) ++itemCount;
-            else if (cJSON_IsObject(x)) stack.push_back(x);
+    for (cJSON* top = menuItem->child; top; top = top->next)
+        itemCount += countMenuCommands(top);
+    std::vector<std::wstring> configuredToolbarScripts;
+    std::vector<std::wstring> configuredToolbarIcons;
+    std::vector<std::wstring> configuredToolbarTitles;
+    if (toolbarItem) {
+        const std::wstring iconFolder = iconFolderItem
+            ? utf8ToWide(iconFolderItem->valuestring) : L"./icon";
+        const std::wstring resolvedIconFolder = resolveScriptFolder(jsonPath, iconFolder);
+        for (cJSON* item = toolbarItem->child; item; item = item->next) {
+            cJSON* iconItem = cJSON_GetObjectItemCaseSensitive(item, "icon");
+            cJSON* scriptItem = cJSON_GetObjectItemCaseSensitive(item, "script");
+            cJSON* titleItem = cJSON_GetObjectItemCaseSensitive(item, "title");
+            if (!cJSON_IsObject(item) || !cJSON_IsString(iconItem) ||
+                !cJSON_IsString(scriptItem) || !cJSON_IsString(titleItem) ||
+                (!isCurrentFileToken(utf8ToWide(scriptItem->valuestring)) &&
+                 !hasScriptExtension(utf8ToWide(scriptItem->valuestring)))) {
+                cJSON_Delete(root);
+                MessageBoxW(g_nppData._nppHandle, tr("InvalidToolbarEntry").c_str(), L"NppMenuScripts", MB_OK | MB_ICONERROR);
+                return false;
+            }
+            const std::wstring iconName = utf8ToWide(iconItem->valuestring);
+            std::wstring lowerIcon = iconName;
+            std::transform(lowerIcon.begin(), lowerIcon.end(), lowerIcon.begin(), ::towlower);
+            if (lowerIcon.size() < 4 || lowerIcon.rfind(L".ico") != lowerIcon.size() - 4) {
+                cJSON_Delete(root);
+                MessageBoxW(g_nppData._nppHandle, tr("InvalidToolbarIcon").c_str(), L"NppMenuScripts", MB_OK | MB_ICONERROR);
+                return false;
+            }
+            configuredToolbarScripts.push_back(utf8ToWide(scriptItem->valuestring));
+            configuredToolbarIcons.push_back(joinPath(resolvedIconFolder, iconName));
+            configuredToolbarTitles.push_back(utf8ToWide(titleItem->valuestring));
         }
     }
+    if (configuredToolbarScripts.size() > MAX_TOOLBAR_ITEMS) {
+        cJSON_Delete(root);
+        MessageBoxW(g_nppData._nppHandle, tr("ToolbarLimit").c_str(), L"NppMenuScripts", MB_OK | MB_ICONERROR);
+        return false;
+    }
+    if (g_toolbarIconsRegistered) {
+        if (configuredToolbarScripts != g_toolbarScriptFiles || configuredToolbarIcons != g_toolbarIconFiles) {
+            debugLog(L"Toolbar configuration changed; restart Notepad++ for toolbar changes to take effect");
+        }
+    } else {
+        g_toolbarScriptFiles = configuredToolbarScripts;
+        g_toolbarIconFiles = configuredToolbarIcons;
+        g_toolbarTitles = configuredToolbarTitles;
+        g_toolbarIcons.resize(g_toolbarScriptFiles.size());
+    }
+    itemCount += static_cast<int>(g_toolbarScriptFiles.size());
     if (forceRebuild && g_installed) {
         removeMenus();
     }
     if (itemCount > 0) {
         if (!SendMessageW(g_nppData._nppHandle, NPPM_ALLOCATECMDID, static_cast<WPARAM>(itemCount), reinterpret_cast<LPARAM>(&g_cmdBase))) {
             cJSON_Delete(root);
-            MessageBoxW(g_nppData._nppHandle, L"Notepad++ could not allocate menu command IDs.", L"NppNodeJS", MB_OK | MB_ICONERROR); return false;
+            MessageBoxW(g_nppData._nppHandle, tr("AllocateMenuIdsFailed").c_str(), L"NppMenuScripts", MB_OK | MB_ICONERROR); return false;
         }
         g_cmdCount = itemCount;
     }
-    if (!createHotkeyWindow()) { cJSON_Delete(root); MessageBoxW(g_nppData._nppHandle, L"Cannot create hotkey window.", L"NppNodeJS", MB_OK | MB_ICONERROR); return false; }
-    g_outputTitle = utf8ToWide(outputTitleItem->valuestring);
-    if (g_outputTitle.empty()) g_outputTitle = L"NppNodeJS Output";
+    if (!createHotkeyWindow()) { cJSON_Delete(root); MessageBoxW(g_nppData._nppHandle, tr("HotkeyWindowFailed").c_str(), L"NppMenuScripts", MB_OK | MB_ICONERROR); return false; }
+    g_outputDefaultTitle = tr("OutputPane");
+    setOutputPaneTitle(g_outputDefaultTitle);
     g_mainMenu = reinterpret_cast<HMENU>(SendMessageW(g_nppData._nppHandle, NPPM_GETMENUHANDLE, NPPMAINMENU, 0));
-    if (!g_mainMenu) { cJSON_Delete(root); MessageBoxW(g_nppData._nppHandle, L"Cannot get Notepad++ main menu.", L"NppNodeJS", MB_OK | MB_ICONERROR); return false; }
+    if (!g_mainMenu) { cJSON_Delete(root); MessageBoxW(g_nppData._nppHandle, tr("MainMenuFailed").c_str(), L"NppMenuScripts", MB_OK | MB_ICONERROR); return false; }
     const std::wstring configuredFolder = utf8ToWide(scriptFolderItem->valuestring);
     const std::wstring folder = resolveScriptFolder(jsonPath, configuredFolder);
     g_menuJsonPath = fullPath(jsonPath);
     g_scriptFolder = folder;
     // An explicit menu.json boolean overrides the build-time default.
-    // When omitted, NPPNODEJS_DEBUG_DEFAULT determines whether logging is enabled.
-    g_debugEnabled = debugItem ? cJSON_IsTrue(debugItem) : (NPPNODEJS_DEBUG_DEFAULT != 0);
-    g_debugLogPath = g_debugEnabled ? joinPath(g_scriptFolder, L"NppNodeJS-debug.log") : L"";
-    debugLog(L"=== NppNodeJS debug session ===");
+    // When omitted, NPPMENUSCRIPTS_DEBUG_DEFAULT determines whether logging is enabled.
+    g_debugEnabled = debugItem ? cJSON_IsTrue(debugItem) : (NPPMENUSCRIPTS_DEBUG_DEFAULT != 0);
+    g_debugLogPath = g_debugEnabled ? joinPath(g_scriptFolder, L"NppMenuScripts-debug.log") : L"";
+    debugLog(L"=== NppMenuScripts debug session ===");
     debugLog(L"menu.json=" + jsonPath);
     debugLog(L"script_folder=" + g_scriptFolder);
-    debugLog(L"output_pan_title=" + g_outputTitle);
+    debugLog(L"output_pane_title=" + g_outputTitle);
     int helpMenuPosition = findHelpMenuPosition(g_mainMenu);
     for (cJSON* top = menuItem->child; top; top = top->next) {
-        if (!top->string || !cJSON_IsObject(top)) continue;
+        if (!top->string || !cJSON_IsArray(top)) continue;
         HMENU sub = CreatePopupMenu();
         if (!sub || !addJsonMenu(sub, top, folder)) {
             if (sub) DestroyMenu(sub); cJSON_Delete(root); removeMenus(); return false;
@@ -2407,6 +3778,13 @@ static bool installMenus(const std::wstring& jsonPath, bool forceRebuild)
             ++helpMenuPosition;
         }
         g_topMenus.push_back(sub);
+    }
+    g_menuScriptCount = static_cast<int>(g_scriptPaths.size());
+    for (size_t i = 0; i < g_toolbarScriptFiles.size(); ++i) {
+        const std::wstring& script = g_toolbarScriptFiles[i];
+        g_scriptPaths.push_back(isCurrentFileToken(script) ? script : joinPath(folder, script));
+        g_scriptTitles.push_back(g_toolbarTitles[i]);
+        g_cmdIds.push_back(g_cmdBase + static_cast<int>(g_scriptPaths.size()) - 1);
     }
     DrawMenuBar(g_nppData._nppHandle);
     g_installed = true;
@@ -2431,13 +3809,80 @@ extern "C" __declspec(dllexport) const wchar_t* getName() { return PLUGIN_NAME; 
 
 extern "C" __declspec(dllexport) FuncItem* getFuncsArray(int* nbF)
 {
-    *nbF = static_cast<int>(sizeof(g_funcItems) / sizeof(g_funcItems[0]));
-    return g_funcItems;
+    swprintf_s(g_funcItems[5]._itemName, L"About NppMenuScripts (v%u.%u.%u.%u)",
+               NPP_MENUSCRIPTS_VERSION_MAJOR, NPP_MENUSCRIPTS_VERSION_MINOR,
+               NPP_MENUSCRIPTS_VERSION_PATCH, NPP_MENUSCRIPTS_VERSION_BUILD);
+    if (g_allFuncItems.empty()) {
+        g_allFuncItems.assign(std::begin(g_funcItems), std::end(g_funcItems));
+        const auto callbacks = makeToolbarCallbacks(std::make_index_sequence<MAX_TOOLBAR_ITEMS>{});
+        for (size_t i = 0; i < g_toolbarScriptFiles.size(); ++i) {
+            FuncItem item{};
+            wcsncpy_s(item._itemName, g_toolbarTitles[i].c_str(), _TRUNCATE);
+            item._pFunc = callbacks[i];
+            g_allFuncItems.push_back(item);
+        }
+    }
+    *nbF = static_cast<int>(g_allFuncItems.size());
+    return g_allFuncItems.data();
 }
 
 extern "C" __declspec(dllexport) void beNotified(SCNotification* notifyCode)
 {
+    if (notifyCode && notifyCode->nmhdr.code == NPPN_READY) {
+        loadTranslations();
+        // setInfo() can run before Notepad++ has finished restoring its UI and
+        // session. Reinstall the configured menus once the main window is ready
+        // so startup-time menu changes cannot leave stale or misplaced entries.
+        if (g_installed && !g_menuJsonPath.empty()) {
+            const std::wstring menuPath = g_menuJsonPath;
+            debugLog(L"NPPN_READY received; rebuilding menus after Notepad++ initialization");
+            if (!installMenus(menuPath, true)) {
+                debugLog(L"NPPN_READY menu rebuild failed; retrying installation");
+                installMenus(menuPath, false);
+            }
+        }
+        g_outputDefaultTitle = tr("OutputPane");
+        if (g_outputDefaultTitle.empty()) g_outputDefaultTitle = L"Output Pane";
+        setOutputPaneTitle(g_outputDefaultTitle);
+        installPluginMenuMessageHook();
+        applyTranslatedPluginMenu();
+        return;
+    }
+    if (notifyCode && notifyCode->nmhdr.code == NPPN_NATIVELANGCHANGED) {
+        debugLog(L"NPPN_NATIVELANGCHANGED received; scheduling translation refresh");
+        if (g_hotkeyWnd) {
+            PostMessageW(g_hotkeyWnd, WM_NPPMENUSCRIPTS_REFRESH_LANGUAGE, 0, 0);
+        } else {
+            loadTranslations();
+            g_outputDefaultTitle = tr("OutputPane");
+            if (g_outputDefaultTitle.empty()) g_outputDefaultTitle = L"Output Pane";
+            setOutputPaneTitle(g_outputDefaultTitle);
+            applyTranslatedPluginMenu();
+        }
+        return;
+    }
+    if (notifyCode && notifyCode->nmhdr.code == NPPN_TBMODIFICATION && !g_toolbarIconsRegistered) {
+        const size_t baseCount = sizeof(g_funcItems) / sizeof(g_funcItems[0]);
+        for (size_t i = 0; i < g_toolbarScriptFiles.size(); ++i) {
+            if (!loadToolbarIcon(g_toolbarIconFiles[i], g_toolbarIcons[i])) {
+                debugLog(L"Toolbar icon could not be loaded: " + g_toolbarIconFiles[i]);
+                continue;
+            }
+            const int commandId = g_allFuncItems[baseCount + i]._cmdID;
+            if (!SendMessageW(g_nppData._nppHandle, NPPM_ADDTOOLBARICON_FORDARKMODE,
+                              static_cast<WPARAM>(commandId),
+                              reinterpret_cast<LPARAM>(&g_toolbarIcons[i]))) {
+                debugLog(L"Toolbar icon registration failed for command id=" + std::to_wstring(commandId));
+            } else {
+                debugLog(L"Toolbar icon registered for command id=" + std::to_wstring(commandId));
+            }
+        }
+        organizeToolbarCommandsInPluginMenu();
+        g_toolbarIconsRegistered = true;
+        return;
+    }
     if (notifyCode && notifyCode->nmhdr.code == NPPN_SHUTDOWN) {
+        removePluginMenuMessageHook();
         g_shuttingDown.store(true);
         {
             std::lock_guard<std::mutex> lock(g_processHandleMutex);

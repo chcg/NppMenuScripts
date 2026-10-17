@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-rem Set DEBUG=1 when a debug build should write NppNodeJS-debug.log by default.
+rem Set DEBUG=1 when a debug build should write NppMenuScripts-debug.log by default.
 rem menu.json "debug": true/false overrides this default.
 if not defined DEBUG set DEBUG=0
 
@@ -22,16 +22,16 @@ if not exist third_party\cJSON.h (
   exit /b 1
 )
 
-windres src\NppNodeJS.rc build\NppNodeJS-res.o
+windres src\resource.rc build\resource.o
 if errorlevel 1 exit /b %errorlevel%
 
-g++ -m64 -std=c++17 -O2 -shared -static -static-libgcc -static-libstdc++ ^
-  -DNPPNODEJS_DEBUG_DEFAULT=%DEBUG% ^
+g++ -m64 -std=c++17 -O2 -s -shared -static -static-libgcc -static-libstdc++ ^
+  -DNPPMENUSCRIPTS_DEBUG_DEFAULT=%DEBUG% ^
   -Isrc -Ithird_party ^
-  src/main.cpp third_party/cJSON.c build/NppNodeJS-res.o ^
-  -o build/NppNodeJS.dll ^
+  src/main.cpp third_party/cJSON.c build/resource.o ^
+  -o build/NppMenuScripts.dll ^
   -luser32 -lgdi32 -lkernel32 -lcomdlg32 -lshell32
 
 if errorlevel 1 exit /b %errorlevel%
-echo Built build\NppNodeJS.dll (DEBUG=%DEBUG%)
+echo Built build\NppMenuScripts.dll (DEBUG=%DEBUG%)
 endlocal

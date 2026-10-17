@@ -1,18 +1,39 @@
 {
   "script_folder": "./script",
-  "output_pan_title": "Output Pane",
   "menu": {
-    "Tests(&1)": {
-      "Output Pane Basic Test\tCtrl+E": "hello-world.js",
-      "Alert Test (.js)\tShift+F1": "test-alert.js",
-      "Alert Test (.mjs)": "test-alert.mjs",
-      "Prompt Test (.js)\tAlt+F1": "test-prompt.js",
-      "Confirm Test (.js)": "test-confirm.js",
-      "Async Alert Demo": "test-async-alert.js",
-      "getFileName / getCursor Test": "test-file-cursor.js",
-      "getLine / setLine Test": "test-line.js",
-      "getSelection / setSelection Test": "test-selection.js",
-      "getText / setText Test": "test-text.js"
+    "Sample(&1)": [
+      { "title": "Hello World\tCtrl+F1", "script": "hello-world.js" },
+      { "title": "Helper API Test", "script": "test.js" },
+      { "title": "Alert Test (ES Module)", "script": "test-alert.mjs" },
+      { "title": "Async Alert Demo", "script": "test-async-alert.js" },
+      {
+        "title": "Perl Tests",
+        "sub": [
+          { "title": "Hello World", "script": "hello-world.pl" },
+          { "title": "Helper API Test", "script": "test.pl" }
+        ]
+      },
+      {
+        "title": "Python Tests",
+        "sub": [
+          { "title": "Hello World", "script": "hello-world.py" }
+        ]
+      },
+      {},
+      { "title": "Run Current Script", "script": "{CURRENT_FILE}" }
+    ]
+  },
+  "icon_folder": "./icon",
+  "toolbar": [
+    {
+      "icon": "sample.ico",
+      "script": "hello-world.js",
+      "title": "Run sample"
+    },
+    {
+      "icon": "sample.ico",
+      "script": "{CURRENT_FILE}",
+      "title": "Run Current Script"
     }
-  }
+  ]
 }

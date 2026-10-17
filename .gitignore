@@ -18,6 +18,10 @@ yarn-error.log*
 
 # Node.js caches
 .npm/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
 .eslintcache
 .nyc_output/
 coverage/
