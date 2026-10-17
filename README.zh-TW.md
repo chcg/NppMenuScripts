@@ -4,8 +4,6 @@
 
 NppMenuScripts 是 Notepad++ 的 x64 外掛程式。它可讓您自訂「選單」或「工具列」，並執行自己撰寫的腳本。支援 JavaScript、Python 和 Perl。
 
-
-
 ## 功能概述
 - 透過 `menu.json` 檔，配置「選單」或「工具列」。
 - 與編輯中的文件互動：
@@ -15,8 +13,8 @@ NppMenuScripts 是 Notepad++ 的 x64 外掛程式。它可讓您自訂「選單�
     - Perl - `MenuHelper.pm`
   - 透過 Helper API 開啟檔案並切換至該文件，或保留目前文件；也可讀取或修改「全文」、「所在列」和「選取文字」，以及取得「檔案路徑」和「游標位置」。
   - 提供原生 `npp.alert()`、`npp.prompt()`、`npp.confirm()` 對話框。
-- 即使未使用 Helper API，`stdout` 和 `stderr` 也會直接顯示在「輸出面板」。
-- 按住 Ctrl 並點擊自訂「選單」項目或「工具列」按鈕，可直接開啟對應腳本進行編輯；檔案不存在時可選擇建立範本。
+- 即使未使用 Helper API，`stdout` 和 `stderr` 也會直接顯示在「輸出面板」。支援基本 ANSI 色彩控制碼。
+- 按住 Ctrl 並點擊自訂的「選單項目」或「工具列按鈕」，可直接開啟對應腳本進行編輯；檔案不存在時可選擇建立範本。
 - 關閉 Notepad++ 時會清理正在執行的腳本程序。
 - 多國語言檔 `i18n.json`
 
@@ -31,13 +29,13 @@ NppMenuScripts 是 Notepad++ 的 x64 外掛程式。它可讓您自訂「選單�
 ## 安裝
 
 1. 編譯或取得 `NppMenuScripts.dll`。
-2. 建立 Plugin 目錄：`Notepad++\plugins\NppMenuScripts\`。
-3. 將 `NppMenuScripts.dll` 放入該目錄。
-4. 預設情況下，將 `menu.json`、`i18n.json`、`menu-helper.js`、`menu_helper.py`、`MenuHelper.pm`、`package.json` 與 `icon` 目錄放在 `NppMenuScripts.dll` 同一目錄。
-5. 將 `.js`、`.mjs`、`.pl` 或 `.py` 腳本放在 `script_folder` 指定的目錄。
-6. 重新啟動 Notepad++。
+2. 通常在 `C:\Program Files\Notepad++\plugins` 底下建立 `NppMenuScripts` 資料夾。
+3. 預設情況下，下列檔案皆置於該資料夾：
+`NppMenuScripts.dll`、`menu.json`、`i18n.json`、`menu-helper.js`、`menu_helper.py`、`MenuHelper.pm`、`package.json` 及 `icon 資料夾`
+4. 將 `.js`、`.mjs`、`.pl` 或 `.py` 腳本放在 `script_folder` 指定的資料夾。
+5. 重新啟動 Notepad++。
 
-典型的目錄結構如下：
+典型的資料夾結構如下：
 
 ```text
 Notepad++\
@@ -61,7 +59,7 @@ Notepad++\
 
 ## 設定
 
-`menu.json` 用來設定腳本目錄、選單階層以及鍵盤快捷鍵。您可以直接從 Notepad++ 主選單 **Plugins > NppMenuScripts > Open menu.json** 開啟它。它長得像這樣：
+`menu.json` 用來設定腳本資料夾、選單階層以及鍵盤快捷鍵。您可以直接由「外掛選單」 `開啟 menu.json`。它長得像這樣：
 
 ```json
 {
@@ -69,52 +67,38 @@ Notepad++\
   "menu": {
     "Tools": [
       { "title": "Hello World\tCtrl+1", "script": "hello-world.js" },
-      {},
-      { "title": "Run Report\tCtrl+Shift+R", "script": "report.js" },
-      { "title": "Open Utility\tAlt+F8", "script": "utility.js" },
-      {},
+      { "title": "Run Current Script", "script": "{CURRENT_FILE}" },
       {
-        "title": "Language Tests",
-        "sub": [
-          {
-            "title": "Perl Tests",
-            "sub": [
-              { "title": "Hello World", "script": "hello-world.pl" }
-            ]
-          }
+        "title": "Python Tests", "sub": [
+          { "title": "Hello World", "script": "hello-world.py" }
         ]
-      },
-      { "title": "Run Current Script", "script": "{CURRENT_FILE}" }
+      }
     ],
     "Document Tools": [
-      { "title": "Format Document", "script": "format.js" },
-      { "title": "Check Document", "script": "check.js" }
+      { "title": "Format Document", "script": "format.pl" }
     ]
   },
   "icon_folder": "./icon",
   "toolbar": [
-    {
-      "icon": "sample.ico",
-      "script": "hello-world.js",
-      "title": "Run sample"
-    },
-    {
-      "icon": "sample.ico",
-      "script": "{CURRENT_FILE}",
-      "title": "Run Current Script"
-    }
+    { "icon": "sample.ico", "title": "Run sample", "script": "hello-world.js" },
+    { "icon": "sample.ico", "title": "Run Current Script", "script": "{CURRENT_FILE}" }
   ]
 }
 ```
 
-- `menu.json` 必須使用 UTF-8 編碼，預設會從 `NppMenuScripts.dll` 所在目錄載入。若要使用其他位置，可透過 **Plugins > NppMenuScripts > Set menu.json Path...** 設定，便不必直接修改需要系統管理員權限的 `Program Files` 目錄。
-- `script_folder`：腳本目錄。可使用絕對路徑，或以 `menu.json` 所在目錄為基準的相對路徑，例如 `./script`、`../scripts`。
-- 若更動了 `script_folder`，請將 `menu-helper.js` 和 `package.json` 拷到該目錄的上一層，讓 Node.js 能找到 Package Import Alias。
-- `icon_folder`：工具列圖示目錄；相對路徑以 `menu.json` 所在目錄為基準。
-- `toolbar`：以陣列設定工具列按鈕，每個項目指定 `icon`、`title` 和 `script`，最多 32 個。`title` 會作為按鈕的工具提示文字。範例圖示位於 `icon/sample.ico`。工具列設定變更後，請重新啟動 Notepad++。
-- `menu`：每個選單分類都是物件陣列。腳本項目使用 `title` 和 `script`；子選單使用 `title` 和 `sub`，而 `sub` 內可再放子選單、腳本項目或空物件分隔線。可依此建立多層選單。將 `script` 設為 `{CURRENT_FILE}`，即可執行目前編輯中的 `.js`、`.mjs`、`.pl` 或 `.py` 檔案；工具列按鈕也支援此設定。檔案必須先儲存；若有未儲存的修改，NppMenuScripts 會先詢問是否儲存。
-- 若要設定快捷鍵，可在 `title` 後加上 Tab 字元 `\t` 和快捷鍵。
-- 修改並儲存 `menu.json` 後，選擇 **Plugins > NppMenuScripts > Rebuild Menu & Toolbar** 即可重建腳本選單。
+- `menu.json` 必須使用 UTF-8 編碼，預設從 `NppMenuScripts.dll` 所在資料夾載入。若要使用其他位置，可透過「外掛選單」`設定 menu.json 路徑...` 來改變，以避免編輯系統 `Program Files` 內的檔案造成不便。
+- `script_folder`：腳本資料夾。可使用絕對路徑，或以 `menu.json` 所在資料夾為基準的相對路徑，例如 `./script`、`../scripts`。  
+若更動了 `script_folder`，請將 `menu-helper.js` 和 `package.json` 拷到該資料夾的上一層，讓 Node.js 能找到 Package Import Alias。
+- `icon_folder`：工具列圖示資料夾；相對路徑以 `menu.json` 所在資料夾為基準。
+- `toolbar`：工具列按鈕設定。最多 32 個。
+- `menu`：選單設定。可設多層巢狀子選單，最多 16 層子選單。
+- 選單分隔線使用空物件 `{}`。
+- 物件屬性：
+  - `title`：「選單標題」或「工具列按鈕」的提示(Tooltip)。若要設定快捷鍵，可加上 **Tab 字元** `\t` 和鍵盤快捷鍵名稱。
+  - `script`：腳本檔名。若為 `"{CURRENT_FILE}"` 代表執行目前編輯中的腳本檔案；工具列按鈕也支援此設定。
+  - `icon`：工具列按鈕圖示檔 .ico。尺寸為 32×32 像素、具備 32 位元色彩深度（支援全彩與透明度）。
+  - `sub`：子選單項目陣列，可包含子選單或腳本項目。
+- 修改並儲存 `menu.json` 後可選擇「外掛選單」`重建選單與工具列`，不需重啟 Notepad++ 即可審視設定結果。
 
 
 ### 鍵盤快捷鍵
@@ -154,7 +138,7 @@ Notepad++\
 
 您的腳本檔案請以 **UTF-8** 編碼儲存，尤其是含有中文等非 ASCII 字元時。
 
-初次安裝此外掛後，可從 **Plugins > NppMenuScripts > Open Scripts Folder** 開啟內附的腳本範例，或按住 Ctrl 並點擊腳本選單項目，直接開啟範例原始碼。
+初次安裝此外掛後，可從「外掛選單」`開啟腳本資料夾` 開啟內附的腳本範例，或按住 Ctrl 並點擊「腳本選單項目」，直接開啟範例原始碼。
 
 ### JavaScript Helper API
 
@@ -189,7 +173,6 @@ const npp = nppModule.promises;
 
 **注意事項：**
 - 在同一支 JavaScript 中不可同時混用「同步」與「非同步」。
-- 若您曾變更 `script_folder` 的預設路徑，JavaScript Helper 和 `package.json` 可能也需要複製到其上一層目錄。Python 和 Perl Helper 則從外掛目錄載入。
 - 若您曾複製或移動 Helper API 模組，當模組與新版 `NppMenuScripts.dll` 不相容時，首次呼叫 Helper API 會提示您更新該模組。
 
 
@@ -203,7 +186,7 @@ import menu_helper as npp
 npp.alert("Hello from Python")
 ```
 
-NppMenuScripts 會將外掛目錄加入 Python 模組搜尋路徑，讓 Python 可以載入 `menu_helper.py`。
+NppMenuScripts 會將外掛資料夾加入 Python 模組搜尋路徑，讓 Python 可以載入 `menu_helper.py`。
 
 ### Perl Helper API
 
@@ -216,41 +199,60 @@ my $npp = MenuHelper->new();
 $npp->alert('Hello from Perl');
 ```
 
-NppMenuScripts 會將外掛目錄加入 Perl 模組搜尋路徑，讓 Perl 可以載入 `MenuHelper.pm`。
+NppMenuScripts 會將外掛資料夾加入 Perl 模組搜尋路徑，讓 Perl 可以載入 `MenuHelper.pm`。
 
-### API 列表
+### API 參考
 
-| API | 回傳值 | 功能 |
+#### 對話框
+| API | 回傳值 | 說明 |
 |---|---|---|
 | `alert(message, [title])` | `void` | 訊息對話框 |
 | `prompt(message, [defaultValue], [title])` | `string / null` | 提示使用者輸入文字；按取消時回傳 `null` |
 | `confirm(message, [title])` | `true / false` | 確認對話框 |
+
+#### 編輯中的文字
+| API | 回傳值 | 說明 |
+|---|---|---|
 | `getLine()`<br>`setLine(text)` | `string / boolean` | 讀取或置換游標所在**列文字** |
 | `getSelection()`<br>`setSelection(text)`<br>`hasSelection()` | `string / boolean / boolean` | 讀取或置換目前**選取文字**；若沒有選取，則在游標處插入文字 |
 | `getText()`<br>`setText(text)` | `string / boolean` | 讀取或置換當前文件**全部文字** |
 | `getClipBoard()`<br>`setClipBoard(text)` | `string / boolean` | 讀取或設定**剪貼簿**文字 |
-| `getFileName()` | `string` | 取得目前文件完整路徑 |
-| `saveFile()` | `boolean` | 儲存目前文件 |
-| `getOpenFiles()` | `string[]` | 回傳所有已開啟且有檔名的文件完整路徑 |
-| `closeFile(fullPathFileName)` | `boolean` | 關閉指定檔案；若使用者取消未儲存提示則回傳 `false` |
-| `openFile(fullPathFileName)` | `boolean` | 開啟檔案並切換至該文件 |
-| `openFileInBackground(fullPathFileName)` | `boolean` | 另開檔案，目前文件不變 |
+
+#### 游標及捲軸
+| API | 回傳值 | 說明 |
+|---|---|---|
 | `getCursor()`<br>`setCursor(line, column)` | `{line: number, column: number} / boolean` | 取得或設定目前游標位置 (0 起算) |
 | `getScrollLine()`<br>`setScrollLine(line)` | `number / boolean` | 取得或設定編輯區捲動行號 (0 起算)；若在摺疊中會自動展開，若該行隱藏則回傳 `false` |
+
+#### 檔案
+| API | 回傳值 | 說明 |
+|---|---|---|
+| `getFileName()` | `string` | 取得目前文件完整路徑 |
+| `getOpenFiles()` | `string[]` | 回傳所有已開啟且有檔名的文件完整路徑 |
+| `openFile(fullPathFileName)` | `boolean` | 開啟檔案並切換至該文件 |
+| `openFileInBackground(fullPathFileName)` | `boolean` | 開啟檔案並保留目前作用中的文件 |
+| `saveFile()` | `boolean` | 儲存目前文件；成功回傳 `true`，若文件未命名或儲存失敗則回傳 `false` |
+| `closeFile(fullPathFileName)` | `boolean` | 關閉指定檔案；若使用者取消未儲存提示則回傳 `false` |
+
+#### 其他
+| API | 回傳值 | 說明 |
+|---|---|---|
 | `setStatusBarText(text)` | `boolean` | 設定 Notepad++ 狀態列文字 |
-| `setOutputPaneTitle(text)` | `boolean` | 設定 Output Pane 標題 |
+| `setOutputPaneTitle(text)` | `boolean` | 設定「輸出面板」標題 |
 | `runMenuCommand(commandID)` | `boolean` | 依照 [taiwaneseMandarin.xml](https://github.com/notepad-plus-plus/notepad-plus-plus/blob/master/PowerEditor/installer/nativeLang/taiwaneseMandarin.xml) 中的 ID 執行 Notepad++ 選單指令 |
 
-註：
+
+**注意事項：**
 - 布林值在 Python 回傳 True/False；在 Perl 回傳 1/0。
 - 各腳本語言的 Helper API 為同步呼叫 (Synchronous)。僅 JavaScript 另外提供非同步呼叫 (Asynchronous)。
-- API 參數或 menu.json 中的檔案路徑分隔符 `\` 及 `/`，兩者皆可使用。若使用 `\` 記得跳脫，像這樣 `\\`。
+- 參數中的檔案路徑分隔字元 `\` 及 `/` 皆通用。在字串中若要使用 `\` 記得跳脫，像這樣 `\\`。
+
 
 ## 編譯 NppMenuScripts.dll
 
 `build-x64.bat` 使用 MinGW / Strawberry GCC。
 
-1. 執行 `get-cjson.bat` 取得所需的 cJSON 原始碼。
+1. 執行 `get-cjson.bat` 下載所需的 cJSON 原始碼。
 2. 確認 `g++` 已在環境變數 `PATH` 中可執行。
 3. 執行 `build-x64.bat`。
 4. 產出 DLL 於 `build/NppMenuScripts.dll`。
