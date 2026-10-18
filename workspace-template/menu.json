@@ -26,12 +26,12 @@
   "icon_folder": "./icon",
   "toolbar": [
     {
-      "icon": "sample.ico",
+      "icon": "hello.ico",
       "script": "hello-world.js",
-      "title": "Run sample"
+      "title": "Run Hello World"
     },
     {
-      "icon": "sample.ico",
+      "icon": "run.ico",
       "script": "{CURRENT_FILE}",
       "title": "Run Current Script"
     }

@@ -31,10 +31,8 @@ NppMenuScripts is an x64 Notepad++ plugin. It lets you customize menus and toolb
 
 1. Build or obtain `NppMenuScripts.dll`.
 2. Create a `NppMenuScripts` folder under `Notepad++\plugins`, usually `C:\Program Files\Notepad++\plugins`.
-3. By default, place the following files in that folder:
-   `NppMenuScripts.dll`, `menu.json`, `i18n.json`, `menu-helper.js`, `menu_helper.py`, `MenuHelper.pm`, `package.json`, and the `icon` folder.
-4. Put your `.js`, `.mjs`, `.pl`, or `.py` scripts in the folder specified by `script_folder`.
-5. Restart Notepad++.
+3. Place `NppMenuScripts.dll`, `i18n.json`, `menu-helper.js`, `menu_helper.py`, `MenuHelper.pm`, `package.json`, and the `workspace-template` folder in the plugin folder.
+4. Restart Notepad++. On its first launch, NppMenuScripts creates the workspace folder and copies the example files. It is usually located at `%APPDATA%\Notepad++\plugins\Config\NppMenuScripts\workspace`.
 
 A typical folder structure is:
 
@@ -43,29 +41,31 @@ Notepad++\
 ├─ plugins\
 │  └─ NppMenuScripts\
 │     ├─ NppMenuScripts.dll
-│     ├─ menu.json
 │     ├─ i18n.json
 │     ├─ menu-helper.js
 │     ├─ menu_helper.py
 │     ├─ MenuHelper.pm
 │     ├─ package.json
-│     ├─ icon\
-│     │  └─ run-sample.ico
-│     └─ script\
-│        ├─ hello-world.js
-│        ├─ hello-world.py
-│        └─ my-script.js
+│     └─ workspace-template\
+│        ├─ menu.json
+│        ├─ icon\
+│        │  ├─ hello.ico
+│        │  └─ run.ico
+│        └─ script\
+│           ├─ hello-world.js
+│           ├─ hello-world.py
+│           └─ test.js
 ```
 
 ## Configuration
 
-`menu.json` configures the script folder, menu hierarchy, and keyboard shortcuts. You can open it from the plugin menu using **Open menu.json**. For example:
+`menu.json` configures the menu structure, toolbar, keyboard shortcuts, script folder, and icon folder. For example:
 
 ```json
 {
   "script_folder": "./script",
   "menu": {
-    "Tools": [
+    "&Hello": [
       { "title": "Hello World\tCtrl+1", "script": "hello-world.js" },
       { "title": "Run Current Script", "script": "{CURRENT_FILE}" },
       {
@@ -74,19 +74,19 @@ Notepad++\
         ]
       }
     ],
-    "Document Tools": [
+    "&Document": [
       { "title": "Format Document", "script": "format.pl" }
     ]
   },
   "icon_folder": "./icon",
   "toolbar": [
-    { "icon": "sample.ico", "title": "Run sample", "script": "hello-world.js" },
-    { "icon": "sample.ico", "title": "Run Current Script", "script": "{CURRENT_FILE}" }
+    { "icon": "hello.ico", "title": "Run Hello World", "script": "hello-world.js" },
+    { "icon": "run.ico", "title": "Run Current Script", "script": "{CURRENT_FILE}" }
   ]
 }
 ```
 
-- `menu.json` must use UTF-8 encoding. By default, it is loaded from the folder containing `NppMenuScripts.dll`. To use a different location, choose **Plugins > NppMenuScripts > Set menu.json Path...**; this avoids editing files under `Program Files`.
+- `menu.json` must be located in the workspace folder and use UTF-8 encoding. Choose **Open menu.json** from the plugin menu to edit it, or change the workspace folder. You can name this folder anything you like; it does not have to be named `workspace`.
 - `script_folder`: The script folder. Use an absolute path or a relative path based on the folder containing `menu.json`, such as `./script` or `../scripts`.  
 If you change `script_folder`, copy `menu-helper.js` and `package.json` to its parent folder so Node.js can resolve the package import alias.
 - `icon_folder`: The toolbar icon folder. Relative paths are based on the folder containing `menu.json`.
@@ -134,7 +134,7 @@ Every shortcut must include at least one modifier key, such as `Ctrl+1`, `Alt+F8
 
 Save your script files as **UTF-8**, especially when they contain non-ASCII characters.
 
-After installing the plugin, choose **Plugins > NppMenuScripts > Open Scripts Folder** to open the included script examples. You can also hold Ctrl and click a script menu item to open its source in Notepad++.
+After installing the plugin, choose **Plugins > NppMenuScripts > Open Scripts Folder** to view the included examples. You can also hold Ctrl and click a script menu item to open its source in Notepad++.
 
 ### JavaScript Helper API
 
@@ -154,7 +154,7 @@ import npp from '#menu-helper';
 
 ### Promise-based asynchronous API
 
-For asynchronous work, use the Promise API. Each method returns a Promise. See `script/test-async-alert.js` for an example.
+For asynchronous work, use the Promise API. Each method returns a Promise. See `workspace-template/script/test-async-alert.js` for an example.
 
 ```js
 /* CommonJS (.js) */

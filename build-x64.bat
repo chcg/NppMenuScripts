@@ -30,7 +30,7 @@ g++ -m64 -std=c++17 -O2 -s -shared -static -static-libgcc -static-libstdc++ ^
   -Isrc -Ithird_party ^
   src/main.cpp third_party/cJSON.c build/resource.o ^
   -o build/NppMenuScripts.dll ^
-  -luser32 -lgdi32 -lkernel32 -lcomdlg32 -lshell32
+  -luser32 -lgdi32 -lkernel32 -lcomdlg32 -lshell32 -lole32
 
 if errorlevel 1 exit /b %errorlevel%
 echo Built build\NppMenuScripts.dll (DEBUG=%DEBUG%)

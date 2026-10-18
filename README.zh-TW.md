@@ -30,10 +30,8 @@ NppMenuScripts 是 Notepad++ 的 x64 外掛程式。它可讓您自訂「選單�
 
 1. 編譯或取得 `NppMenuScripts.dll`。
 2. 通常在 `C:\Program Files\Notepad++\plugins` 底下建立 `NppMenuScripts` 資料夾。
-3. 預設情況下，下列檔案皆置於該資料夾：
-`NppMenuScripts.dll`、`menu.json`、`i18n.json`、`menu-helper.js`、`menu_helper.py`、`MenuHelper.pm`、`package.json` 及 `icon 資料夾`
-4. 將 `.js`、`.mjs`、`.pl` 或 `.py` 腳本放在 `script_folder` 指定的資料夾。
-5. 重新啟動 Notepad++。
+3. 將 `NppMenuScripts.dll`、`i18n.json`、`menu-helper.js`、`menu_helper.py`、`MenuHelper.pm`、`package.json` 和 `workspace-template` 資料夾放在外掛資料夾。
+4. 重啟 Notepad++ 後，首次啟動 NppMenuScripts 會自動建立「工作區資料夾」並放入範例檔案。通常位於 `%APPDATA%\Notepad++\plugins\Config\NppMenuScripts\workspace`。
 
 典型的資料夾結構如下：
 
@@ -42,30 +40,33 @@ Notepad++\
 ├─ plugins\
 │  └─ NppMenuScripts\
 │     ├─ NppMenuScripts.dll
-│     ├─ menu.json
 │     ├─ i18n.json
 │     ├─ menu-helper.js
 │     ├─ menu_helper.py
 │     ├─ MenuHelper.pm
 │     ├─ package.json
-│     ├─ icon\
-│     │  └─ run-sample.ico
-│     └─ script\
-│        ├─ hello-world.js
-│        ├─ hello-world.py
-│        └─ my-script.js
+│     └─ workspace-template\
+│        ├─ menu.json
+│        ├─ icon\
+│        │  ├─ hello.ico
+│        │  └─ run.ico
+│        └─ script\
+│           ├─ hello-world.js
+│           ├─ hello-world.py
+│           └─ test.js
+
 ```
 
 
 ## 設定
 
-`menu.json` 用來設定腳本資料夾、選單階層以及鍵盤快捷鍵。您可以直接由「外掛選單」 `開啟 menu.json`。它長得像這樣：
+`menu.json` 用來設定「選單結構」、「工具列」、「鍵盤快捷鍵」、「腳本資料夾」及「圖示資料夾」。它長得像這樣：
 
 ```json
 {
   "script_folder": "./script",
   "menu": {
-    "Tools": [
+    "&Hello": [
       { "title": "Hello World\tCtrl+1", "script": "hello-world.js" },
       { "title": "Run Current Script", "script": "{CURRENT_FILE}" },
       {
@@ -74,19 +75,19 @@ Notepad++\
         ]
       }
     ],
-    "Document Tools": [
+    "&Document": [
       { "title": "Format Document", "script": "format.pl" }
     ]
   },
   "icon_folder": "./icon",
   "toolbar": [
-    { "icon": "sample.ico", "title": "Run sample", "script": "hello-world.js" },
-    { "icon": "sample.ico", "title": "Run Current Script", "script": "{CURRENT_FILE}" }
+    { "icon": "hello.ico", "title": "Run Hello World", "script": "hello-world.js" },
+    { "icon": "run.ico", "title": "Run Current Script", "script": "{CURRENT_FILE}" }
   ]
 }
 ```
 
-- `menu.json` 必須使用 UTF-8 編碼，預設從 `NppMenuScripts.dll` 所在資料夾載入。若要使用其他位置，可透過「外掛選單」`設定 menu.json 路徑...` 來改變，以避免編輯系統 `Program Files` 內的檔案造成不便。
+- `menu.json` 必須位於「工作區資料夾」內。檔案為 UTF-8 編碼格式。可從「外掛選單」`開啟 menu.json` 進行編輯、或改變「工作區資料夾」位置。你可自由命名該資料夾名稱，不一定要叫 `workspace`。
 - `script_folder`：腳本資料夾。可使用絕對路徑，或以 `menu.json` 所在資料夾為基準的相對路徑，例如 `./script`、`../scripts`。  
 若更動了 `script_folder`，請將 `menu-helper.js` 和 `package.json` 拷到該資料夾的上一層，讓 Node.js 能找到 Package Import Alias。
 - `icon_folder`：工具列圖示資料夾；相對路徑以 `menu.json` 所在資料夾為基準。
@@ -138,7 +139,7 @@ Notepad++\
 
 您的腳本檔案請以 **UTF-8** 編碼儲存，尤其是含有中文等非 ASCII 字元時。
 
-初次安裝此外掛後，可從「外掛選單」`開啟腳本資料夾` 開啟內附的腳本範例，或按住 Ctrl 並點擊「腳本選單項目」，直接開啟範例原始碼。
+初次安裝此外掛後，可從「外掛選單」選擇 `開啟腳本資料夾` 查看內附的腳本範例；也可按住 Ctrl 並點擊「腳本選單項目」，直接開啟範例原始碼。
 
 ### JavaScript Helper API
 
@@ -157,7 +158,7 @@ import npp from '#menu-helper';
 ```
 
 ### Promise 非同步 API
-非同步 (Async) 工作，請使用 Promise API。各 Method 回傳值會以 Promise 包裝。範例請參考 `script/test-async-alert.js`。
+非同步 (Async) 工作，請使用 Promise API。各 Method 回傳值會以 Promise 包裝。範例請參考 `workspace-template/script/test-async-alert.js`。
 
 ```js
 /* CommonJS (.js) */

@@ -18,7 +18,6 @@
 #include <cwchar>
 #include <utility>
 #include <unordered_map>
-#include <commdlg.h>
 #include <shellapi.h>
 #include <shlobj.h>
 
@@ -46,7 +45,7 @@ static void showAbout();
 static void openScriptsFolder();
 static void openMenuJson();
 static void rebuildMenu();
-static void setMenuJsonPath();
+static void setWorkspaceFolder();
 static bool installMenus(const std::wstring& jsonPath, bool forceRebuild = false);
 static void removeMenus();
 static void runToolbarScript(size_t index);
@@ -64,7 +63,7 @@ static FuncItem g_funcItems[] = {
     { L"Open Scripts Folder", openScriptsFolder, 0, false, nullptr },
     { L"Open menu.json", openMenuJson, 0, false, nullptr },
     { L"Rebuild Menu && Toolbar", rebuildMenu, 0, false, nullptr },
-    { L"Set menu.json Path...", setMenuJsonPath, 0, false, nullptr },
+    { L"Set Workspace Folder...", setWorkspaceFolder, 0, false, nullptr },
     { L"", nullptr, 0, false, nullptr },
     { L"", showAbout, 0, false, nullptr }
 };
@@ -101,6 +100,7 @@ static std::wstring g_outputDefaultTitle = L"Output Pane";
 static int g_stdoutAnsiColor = -1;
 static int g_stderrAnsiColor = -1;
 static std::wstring g_scriptFolder;
+static std::wstring g_workspaceFolder;
 static std::wstring g_debugLogPath;
 static bool g_debugEnabled = (NPPMENUSCRIPTS_DEBUG_DEFAULT != 0);
 static std::wstring g_menuJsonPath;
@@ -222,19 +222,24 @@ static const std::wstring& tr(const char* key)
     static const std::unordered_map<std::string, std::wstring> builtInEnglish = {
         {"OutputPane", L"Output Pane"}, {"OpenScriptsFolder", L"Open Scripts Folder"},
         {"OpenMenuJson", L"Open menu.json"}, {"RebuildMenuToolbar", L"Rebuild Menu && Toolbar"},
-        {"SetMenuJsonPath", L"Set menu.json Path..."}, {"About", L"About NppMenuScripts (v{version})"},
+        {"SetWorkspaceFolder", L"Set Workspace Folder..."},
+        {"About", L"About NppMenuScripts (v{version})"},
         {"Toolbar", L"Toolbar"}, {"ScriptRunning", L"Running - {name}"},
         {"ScriptCompleted", L"Script completed"}, {"ScriptFailed", L"Script failed"},
-        {"UsingMenuJson", L"Using: {path}"}, {"MenuRebuilt", L"Rebuilt: {path}"},
-        {"PleaseWaitSetPath", L"Please wait until the current script has finished before changing the menu configuration file."},
+        {"MenuRebuilt", L"Rebuilt: {path}"},
+        {"PleaseWaitSetWorkspacePath", L"Please wait until the current script has finished before changing the workspace folder."},
         {"PleaseWait", L"Please wait until the current script has finished."},
         {"PleaseWaitRebuild", L"Please wait until the current script has finished before rebuilding the menu."},
+        {"OpenScriptsFolderFailed", L"Unable to open the scripts folder."},
         {"ScriptsFolderMissing", L"The scripts folder does not exist. Create it?"},
         {"CreateScriptsFolderFailed", L"Unable to create the scripts folder."},
-        {"OpenScriptsFolderFailed", L"Unable to open the scripts folder."},
         {"MenuJsonMissing", L"The current menu.json file does not exist."},
+        {"WorkspaceInitFailed", L"Unable to initialize the workspace. It must be empty or contain menu.json."},
+        {"WorkspacePathSaveFailed", L"Unable to save the workspace path."},
+        {"WorkspaceInsidePluginFolder", L"Choose a workspace outside the NppMenuScripts plugin folder so Plugin Admin updates cannot replace your files."},
+        {"SelectWorkspaceFolder", L"Select NppMenuScripts workspace folder"},
+        {"WorkspacePathSet", L"Workspace: {path}"},
         {"OpenGithubFailed", L"Unable to open the NppMenuScripts GitHub page."},
-        {"MenuPathSaveFailed", L"The menu configuration was changed, but NppMenuScripts could not save the new path.\r\n\r\nThe new path will remain active until Notepad++ is restarted."},
         {"ScriptAlreadyRunning", L"A script is already running."},
         {"HelperIncompatible", L"The NppMenuScripts helper module is incompatible with the loaded NppMenuScripts.dll.\r\n\r\nCopy the matching helper module next to NppMenuScripts.dll or into the parent directory of script_folder, then run the script again."},
         {"CreateScriptPrompt", L"{name} does not exist. Create it?"},
@@ -256,8 +261,6 @@ static const std::wstring& tr(const char* key)
         {"UnableStartNode", L"[NppMenuScripts] Unable to start node.exe. Error code: {error}\r\n"},
         {"UnableStartPerl", L"[NppMenuScripts] Unable to start perl.exe. Error code: {error}\r\n"},
         {"UnableStartPython", L"[NppMenuScripts] Unable to start py.exe. Error code: {error}\r\n"},
-        {"SelectMenuJson", L"Select NppMenuScripts menu.json"},
-        {"JsonFiles", L"JSON files (*.json)"}, {"AllFiles", L"All files (*.*)"}
     };
     const auto it = g_translations.find(key);
     if (it != g_translations.end()) return it->second;
@@ -360,7 +363,7 @@ static bool setMenuLabelByCommand(HMENU menu, UINT commandId, const wchar_t* lab
 
 static void applyTranslatedPluginMenu()
 {
-    const char* keys[] = { "OpenScriptsFolder", "OpenMenuJson", "RebuildMenuToolbar", "SetMenuJsonPath", "", "About" };
+    const char* keys[] = { "OpenScriptsFolder", "OpenMenuJson", "RebuildMenuToolbar", "SetWorkspaceFolder", "", "About" };
     for (size_t i = 0; i < std::size(keys); ++i) {
         if (!keys[i][0]) continue;
         std::wstring label = tr(keys[i]);
@@ -540,6 +543,160 @@ static std::wstring resolveScriptFolder(const std::wstring& menuPath, const std:
     return fullPath(joinPath(directoryName(menuPath), configuredFolder));
 }
 
+static std::wstring notepadPluginConfigDirectory()
+{
+    const LRESULT needed = SendMessageW(g_nppData._nppHandle, NPPM_GETPLUGINSCONFIGDIR, 0, 0);
+    if (needed > 0 && needed < 32768) {
+        std::vector<wchar_t> path(static_cast<size_t>(needed) + 1, L'\0');
+        const LRESULT copied = SendMessageW(g_nppData._nppHandle, NPPM_GETPLUGINSCONFIGDIR,
+                                            static_cast<WPARAM>(path.size()), reinterpret_cast<LPARAM>(path.data()));
+        if (copied && path[0]) return fullPath(path.data());
+    }
+
+    // NPPM_GETPLUGINSCONFIGDIR is available in supported Notepad++ versions.
+    // Keep a per-user fallback in case an older host does not answer the message.
+    wchar_t appData[MAX_PATH * 4] = {};
+    const DWORD n = GetEnvironmentVariableW(L"APPDATA", appData, static_cast<DWORD>(std::size(appData)));
+    if (!n || n >= std::size(appData)) return L"";
+    return fullPath(joinPath(joinPath(joinPath(std::wstring(appData, n), L"Notepad++"), L"plugins"), L"Config"));
+}
+
+static std::wstring defaultWorkspaceDirectory()
+{
+    const std::wstring config = notepadPluginConfigDirectory();
+    if (config.empty()) return L"";
+    return fullPath(joinPath(joinPath(config, L"NppMenuScripts"), L"workspace"));
+}
+
+static bool isPathWithinDirectory(const std::wstring& directory, const std::wstring& path)
+{
+    std::wstring parent = fullPath(directory);
+    std::wstring child = fullPath(path);
+    if (parent.empty() || child.empty()) return false;
+    if (_wcsicmp(parent.c_str(), child.c_str()) == 0) return true;
+    if (!parent.empty() && parent.back() != L'\\') parent.push_back(L'\\');
+    return child.size() >= parent.size() && _wcsnicmp(child.c_str(), parent.c_str(), parent.size()) == 0;
+}
+
+static bool ensureDirectoryExists(const std::wstring& path)
+{
+    const DWORD attrs = GetFileAttributesW(path.c_str());
+    if (attrs != INVALID_FILE_ATTRIBUTES) return (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    const int result = SHCreateDirectoryExW(g_nppData._nppHandle, path.c_str(), nullptr);
+    return result == ERROR_SUCCESS || result == ERROR_FILE_EXISTS || result == ERROR_ALREADY_EXISTS;
+}
+
+static bool copyFileIfMissing(const std::wstring& source, const std::wstring& destination)
+{
+    const DWORD attrs = GetFileAttributesW(destination.c_str());
+    if (attrs != INVALID_FILE_ATTRIBUTES) return (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
+    if (GetFileAttributesW(source.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+    if (CopyFileW(source.c_str(), destination.c_str(), TRUE)) return true;
+    return GetLastError() == ERROR_FILE_EXISTS;
+}
+
+static bool copyDirectoryMissing(const std::wstring& source, const std::wstring& destination)
+{
+    const DWORD sourceAttrs = GetFileAttributesW(source.c_str());
+    if (sourceAttrs == INVALID_FILE_ATTRIBUTES || !(sourceAttrs & FILE_ATTRIBUTE_DIRECTORY)) return true;
+    if (!ensureDirectoryExists(destination)) return false;
+
+    WIN32_FIND_DATAW data{};
+    const std::wstring pattern = joinPath(source, L"*");
+    HANDLE find = FindFirstFileW(pattern.c_str(), &data);
+    if (find == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_FILE_NOT_FOUND;
+
+    bool success = true;
+    do {
+        if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0 ||
+            (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+            _wcsicmp(data.cFileName, L"NppMenuScripts-debug.log") == 0) continue;
+        const std::wstring src = joinPath(source, data.cFileName);
+        const std::wstring dst = joinPath(destination, data.cFileName);
+        if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (!copyDirectoryMissing(src, dst)) success = false;
+        } else if (!copyFileIfMissing(src, dst)) {
+            success = false;
+        }
+    } while (success && FindNextFileW(find, &data));
+    FindClose(find);
+    return success;
+}
+
+static bool directoryIsEmpty(const std::wstring& path)
+{
+    WIN32_FIND_DATAW data{};
+    HANDLE find = FindFirstFileW(joinPath(path, L"*").c_str(), &data);
+    if (find == INVALID_HANDLE_VALUE) return false;
+
+    bool empty = true;
+    do {
+        if (wcscmp(data.cFileName, L".") != 0 && wcscmp(data.cFileName, L"..") != 0) {
+            empty = false;
+            break;
+        }
+    } while (FindNextFileW(find, &data));
+    FindClose(find);
+    return empty;
+}
+
+static std::wstring readMenuStringProperty(const std::wstring& path, const char* name, const std::wstring& fallback)
+{
+    std::ifstream file(path.c_str(), std::ios::binary);
+    std::string bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    if (bytes.size() >= 3 && static_cast<unsigned char>(bytes[0]) == 0xEF &&
+        static_cast<unsigned char>(bytes[1]) == 0xBB && static_cast<unsigned char>(bytes[2]) == 0xBF) bytes.erase(0, 3);
+    cJSON* root = bytes.empty() ? nullptr : cJSON_Parse(bytes.c_str());
+    cJSON* value = root ? cJSON_GetObjectItemCaseSensitive(root, name) : nullptr;
+    const std::wstring result = cJSON_IsString(value) ? utf8ToWide(value->valuestring) : fallback;
+    if (root) cJSON_Delete(root);
+    return result;
+}
+
+static bool copyConfiguredFolderFromTemplate(const std::wstring& configuredPath,
+                                            const std::wstring& workspaceDirectory,
+                                            const std::wstring& templateDirectory)
+{
+    const std::wstring source = isAbsolutePath(configuredPath)
+        ? fullPath(configuredPath) : fullPath(joinPath(templateDirectory, configuredPath));
+    const std::wstring templateRoot = fullPath(templateDirectory);
+    if (source.empty() || _wcsicmp(source.c_str(), templateRoot.c_str()) == 0 ||
+        !isPathWithinDirectory(templateRoot, source)) return true;
+    std::wstring relative = source.substr(templateRoot.size());
+    while (!relative.empty() && (relative.front() == L'\\' || relative.front() == L'/')) relative.erase(relative.begin());
+    if (relative.empty()) return true;
+    return copyDirectoryMissing(source, joinPath(workspaceDirectory, relative));
+}
+
+static bool initializeWorkspaceContents(const std::wstring& workspaceDirectory)
+{
+    if (workspaceDirectory.empty() || isPathWithinDirectory(moduleDirectory(), workspaceDirectory) ||
+        !ensureDirectoryExists(workspaceDirectory)) return false;
+
+    const std::wstring pluginDirectory = moduleDirectory();
+    const std::wstring templateDirectory = joinPath(pluginDirectory, L"workspace-template");
+    const std::wstring sourceMenu = joinPath(templateDirectory, L"menu.json");
+    const std::wstring workspaceMenu = joinPath(workspaceDirectory, L"menu.json");
+    const bool initializeDefaults = directoryIsEmpty(workspaceDirectory);
+    if (initializeDefaults && !copyFileIfMissing(sourceMenu, workspaceMenu)) return false;
+    if (!initializeDefaults && GetFileAttributesW(workspaceMenu.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+
+    // The JS package import map and its target must travel with scripts in the workspace.
+    for (const wchar_t* name : { L"package.json", L"menu-helper.js" }) {
+        const std::wstring source = joinPath(pluginDirectory, name);
+        const std::wstring destination = joinPath(workspaceDirectory, name);
+        if (GetFileAttributesW(source.c_str()) != INVALID_FILE_ATTRIBUTES && !CopyFileW(source.c_str(), destination.c_str(), FALSE))
+            return false;
+    }
+
+    if (!initializeDefaults) return true;
+
+    const std::wstring scriptFolder = readMenuStringProperty(sourceMenu, "script_folder", L"./script");
+    const std::wstring iconFolder = readMenuStringProperty(sourceMenu, "icon_folder", L"./icon");
+    return copyConfiguredFolderFromTemplate(scriptFolder, workspaceDirectory, templateDirectory) &&
+           copyConfiguredFolderFromTemplate(iconFolder, workspaceDirectory, templateDirectory);
+}
+
 static std::wstring settingsFilePath()
 {
     wchar_t appData[MAX_PATH * 4] = {};
@@ -548,25 +705,32 @@ static std::wstring settingsFilePath()
     return joinPath(joinPath(joinPath(std::wstring(appData, n), L"Notepad++"), L"plugins"), L"config\\NppMenuScripts.ini");
 }
 
-static std::wstring loadConfiguredMenuPath()
+static std::wstring loadConfiguredWorkspacePath()
 {
     const std::wstring ini = settingsFilePath();
     if (!ini.empty()) {
         wchar_t value[MAX_PATH * 4] = {};
-        const DWORD n = GetPrivateProfileStringW(L"Settings", L"menu_file", L"", value, static_cast<DWORD>(std::size(value)), ini.c_str());
-        if (n > 0) return std::wstring(value, n);
+        const DWORD n = GetPrivateProfileStringW(L"Settings", L"workspace_dir", L"", value,
+                                                 static_cast<DWORD>(std::size(value)), ini.c_str());
+        if (n > 0) return fullPath(value);
     }
-    return joinPath(moduleDirectory(), L"menu.json");
+    return defaultWorkspaceDirectory();
 }
 
-static bool saveConfiguredMenuPath(const std::wstring& path)
+static bool saveConfiguredWorkspacePath(const std::wstring& path)
 {
     const std::wstring ini = settingsFilePath();
     if (ini.empty()) return false;
     const std::wstring configDir = directoryName(ini);
     CreateDirectoryW(directoryName(configDir).c_str(), nullptr);
     CreateDirectoryW(configDir.c_str(), nullptr);
-    return WritePrivateProfileStringW(L"Settings", L"menu_file", path.c_str(), ini.c_str()) != FALSE;
+    return WritePrivateProfileStringW(L"Settings", L"workspace_dir", path.c_str(), ini.c_str()) != FALSE;
+}
+
+static std::wstring workspaceMenuPath()
+{
+    const std::wstring workspace = g_workspaceFolder.empty() ? loadConfiguredWorkspacePath() : g_workspaceFolder;
+    return workspace.empty() ? L"" : joinPath(workspace, L"menu.json");
 }
 
 static std::wstring trim(const std::wstring& s)
@@ -662,59 +826,6 @@ static void destroyHotkeyWindow()
     UnregisterClassW(HOTKEY_CLASS_NAME, g_hModule);
 }
 
-static void setMenuJsonPath()
-{
-    if (g_processRunning.load()) {
-        MessageBoxW(g_nppData._nppHandle,
-                    tr("PleaseWaitSetPath").c_str(),
-                    (std::wstring(L"NppMenuScripts - ") + tr("SetMenuJsonPath")).c_str(), MB_OK | MB_ICONINFORMATION);
-        return;
-    }
-
-    wchar_t fileName[MAX_PATH * 4] = {};
-    const std::wstring current = g_menuJsonPath.empty() ? loadConfiguredMenuPath() : g_menuJsonPath;
-    wcsncpy_s(fileName, current.c_str(), _TRUNCATE);
-
-    OPENFILENAMEW ofn{};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = g_nppData._nppHandle;
-    ofn.lpstrFile = fileName;
-    ofn.nMaxFile = static_cast<DWORD>(std::size(fileName));
-    std::vector<wchar_t> filters;
-    for (const auto& entry : {std::pair<std::wstring, std::wstring>{tr("JsonFiles"), L"*.json"},
-                              std::pair<std::wstring, std::wstring>{tr("AllFiles"), L"*.*"}}) {
-        filters.insert(filters.end(), entry.first.begin(), entry.first.end()); filters.push_back(L'\0');
-        filters.insert(filters.end(), entry.second.begin(), entry.second.end()); filters.push_back(L'\0');
-    }
-    filters.push_back(L'\0');
-    ofn.lpstrFilter = filters.data();
-    ofn.nFilterIndex = 1;
-    const std::wstring dialogTitle = tr("SelectMenuJson");
-    ofn.lpstrTitle = dialogTitle.c_str();
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
-
-    if (!GetOpenFileNameW(&ofn)) return;
-
-    const std::wstring selected = fullPath(fileName);
-    if (selected.empty() || selected == current) return;
-
-    const std::wstring oldPath = current;
-    removeMenus();
-    if (!installMenus(selected)) {
-        removeMenus();
-        installMenus(oldPath);
-        return;
-    }
-
-    setNppStatusText(trFormat("UsingMenuJson", {{L"{path}", g_menuJsonPath}}));
-
-    if (!saveConfiguredMenuPath(selected)) {
-        MessageBoxW(g_nppData._nppHandle,
-                    tr("MenuPathSaveFailed").c_str(),
-                    (std::wstring(L"NppMenuScripts - ") + tr("SetMenuJsonPath")).c_str(), MB_OK | MB_ICONWARNING);
-    }
-}
-
 static void openScriptsFolder()
 {
     if (g_processRunning.load()) {
@@ -725,7 +836,7 @@ static void openScriptsFolder()
     }
 
     const std::wstring folder = g_scriptFolder.empty()
-        ? resolveScriptFolder(loadConfiguredMenuPath(), L"./script")
+        ? resolveScriptFolder(workspaceMenuPath(), L"./script")
         : g_scriptFolder;
     if (folder.empty()) return;
 
@@ -757,7 +868,7 @@ static void openScriptsFolder()
 
 static void openMenuJson()
 {
-    const std::wstring path = g_menuJsonPath.empty() ? loadConfiguredMenuPath() : g_menuJsonPath;
+    const std::wstring path = workspaceMenuPath();
     if (path.empty() || GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
         MessageBoxW(g_nppData._nppHandle,
                     tr("MenuJsonMissing").c_str(),
@@ -766,6 +877,69 @@ static void openMenuJson()
     }
     SendMessageW(g_nppData._nppHandle, NPPM_DOOPEN, 0,
                  reinterpret_cast<LPARAM>(path.c_str()));
+}
+
+static int CALLBACK workspaceFolderBrowseCallback(HWND hwnd, UINT message, LPARAM, LPARAM data)
+{
+    if (message == BFFM_INITIALIZED && data) {
+        SendMessageW(hwnd, BFFM_SETSELECTIONW, TRUE, data);
+    }
+    return 0;
+}
+
+static void setWorkspaceFolder()
+{
+    if (g_processRunning.load()) {
+        MessageBoxW(g_nppData._nppHandle, tr("PleaseWaitSetWorkspacePath").c_str(),
+                    (std::wstring(L"NppMenuScripts - ") + tr("SetWorkspaceFolder")).c_str(), MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    const std::wstring oldWorkspace = g_workspaceFolder.empty() ? loadConfiguredWorkspacePath() : g_workspaceFolder;
+    BROWSEINFOW browse{};
+    browse.hwndOwner = g_nppData._nppHandle;
+    browse.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX;
+    const std::wstring dialogTitle = tr("SelectWorkspaceFolder");
+    browse.lpszTitle = dialogTitle.c_str();
+    browse.lpfn = workspaceFolderBrowseCallback;
+    browse.lParam = reinterpret_cast<LPARAM>(oldWorkspace.c_str());
+    PIDLIST_ABSOLUTE selectedItem = SHBrowseForFolderW(&browse);
+    if (!selectedItem) return;
+
+    wchar_t selectedPath[MAX_PATH * 4] = {};
+    const bool gotPath = SHGetPathFromIDListW(selectedItem, selectedPath) != FALSE;
+    CoTaskMemFree(selectedItem);
+    if (!gotPath) return;
+
+    const std::wstring selected = fullPath(selectedPath);
+    if (selected.empty() || _wcsicmp(selected.c_str(), oldWorkspace.c_str()) == 0) return;
+    if (isPathWithinDirectory(moduleDirectory(), selected)) {
+        MessageBoxW(g_nppData._nppHandle, tr("WorkspaceInsidePluginFolder").c_str(),
+                    (std::wstring(L"NppMenuScripts - ") + tr("SetWorkspaceFolder")).c_str(), MB_OK | MB_ICONWARNING);
+        return;
+    }
+    if (!initializeWorkspaceContents(selected)) {
+        MessageBoxW(g_nppData._nppHandle, tr("WorkspaceInitFailed").c_str(),
+                    (std::wstring(L"NppMenuScripts - ") + tr("SetWorkspaceFolder")).c_str(), MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    const std::wstring newMenuPath = joinPath(selected, L"menu.json");
+    if (!saveConfiguredWorkspacePath(selected)) {
+        MessageBoxW(g_nppData._nppHandle, tr("WorkspacePathSaveFailed").c_str(),
+                    (std::wstring(L"NppMenuScripts - ") + tr("SetWorkspaceFolder")).c_str(), MB_OK | MB_ICONWARNING);
+        return;
+    }
+    removeMenus();
+    g_workspaceFolder = selected;
+    if (!installMenus(newMenuPath)) {
+        removeMenus();
+        g_workspaceFolder = oldWorkspace;
+        saveConfiguredWorkspacePath(oldWorkspace);
+        installMenus(joinPath(oldWorkspace, L"menu.json"));
+        return;
+    }
+    setNppStatusText(trFormat("WorkspacePathSet", {{L"{path}", g_workspaceFolder}}));
 }
 
 static void rebuildMenu()
@@ -777,7 +951,7 @@ static void rebuildMenu()
         return;
     }
 
-    const std::wstring path = g_menuJsonPath.empty() ? loadConfiguredMenuPath() : g_menuJsonPath;
+    const std::wstring path = workspaceMenuPath();
     if (path.empty()) return;
 
     // installMenus() validates the new configuration before removing the current menu.
@@ -3802,7 +3976,14 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
 extern "C" __declspec(dllexport) void setInfo(NppData nppData)
 {
     g_nppData = nppData;
-    installMenus(loadConfiguredMenuPath());
+    g_workspaceFolder = loadConfiguredWorkspacePath();
+    if (g_workspaceFolder.empty() || isPathWithinDirectory(moduleDirectory(), g_workspaceFolder))
+        g_workspaceFolder = defaultWorkspaceDirectory();
+    if (!initializeWorkspaceContents(g_workspaceFolder)) {
+        MessageBoxW(g_nppData._nppHandle, tr("WorkspaceInitFailed").c_str(), L"NppMenuScripts", MB_OK | MB_ICONERROR);
+        return;
+    }
+    installMenus(workspaceMenuPath());
 }
 
 extern "C" __declspec(dllexport) const wchar_t* getName() { return PLUGIN_NAME; }
