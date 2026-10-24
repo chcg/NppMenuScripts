@@ -5,7 +5,7 @@ import os
 import sys
 
 
-_HELPER_API_ID = "9"
+_HELPER_API_ID = "10"
 _HELPER_API_CHECK_PREFIX = "\x1eNPPMENUSCRIPTS_HELPER_API:"
 _api_checked = False
 
@@ -66,15 +66,20 @@ def _default_title():
     return os.environ.get("NPPMENUSCRIPTS_MENU_TITLE", "NppMenuScripts")
 
 
-def alert(message, title=None):
-    _request("\x1eNPPMENUSCRIPTS_ALERT:", _encode(message) + "|" + _encode(title if title is not None else _default_title()))
+def alert(message, title=None, icon=None):
+    _request("\x1eNPPMENUSCRIPTS_ALERT:", "|".join((
+        _encode(message),
+        _encode(title if title is not None else _default_title()),
+        _encode(icon if icon is not None else ""),
+    )))
 
 
-def prompt(message, defaultValue="", title=None):
+def prompt(message, defaultValue="", title=None, icon=None):
     payload = "|".join((
         _encode(message),
         _encode(defaultValue),
         _encode(title if title is not None else _default_title()),
+        _encode(icon if icon is not None else ""),
     ))
     response = _request("\x1eNPPMENUSCRIPTS_PROMPT:", payload)
     if response == "CANCEL":
@@ -84,8 +89,12 @@ def prompt(message, defaultValue="", title=None):
     return response
 
 
-def confirm(message, title=None):
-    payload = _encode(message) + "|" + _encode(title if title is not None else _default_title())
+def confirm(message, title=None, icon=None):
+    payload = "|".join((
+        _encode(message),
+        _encode(title if title is not None else _default_title()),
+        _encode(icon if icon is not None else ""),
+    ))
     return _request("\x1eNPPMENUSCRIPTS_CONFIRM:", payload) == "OK"
 
 

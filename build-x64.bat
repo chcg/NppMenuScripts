@@ -25,12 +25,12 @@ if not exist third_party\cJSON.h (
 windres src\resource.rc build\resource.o
 if errorlevel 1 exit /b %errorlevel%
 
-g++ -m64 -std=c++17 -O2 -s -shared -static -static-libgcc -static-libstdc++ ^
+g++ -m64 -std=c++17 -Oz -ffunction-sections -fdata-sections -s -shared -static -static-libgcc -static-libstdc++ ^
   -DNPPMENUSCRIPTS_DEBUG_DEFAULT=%DEBUG% ^
   -Isrc -Ithird_party ^
   src/main.cpp third_party/cJSON.c build/resource.o ^
   -o build/NppMenuScripts.dll ^
-  -luser32 -lgdi32 -lkernel32 -lcomdlg32 -lshell32 -lole32
+  -Wl,--gc-sections -luser32 -lgdi32 -lkernel32 -lcomdlg32 -lcomctl32 -lshell32 -lole32
 
 if errorlevel 1 exit /b %errorlevel%
 echo Built build\NppMenuScripts.dll (DEBUG=%DEBUG%)

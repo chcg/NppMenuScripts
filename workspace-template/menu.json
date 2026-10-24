@@ -1,5 +1,6 @@
 {
   "script_folder": "./script",
+  "icon_folder": "./icon",
   "menu": {
     "Sample(&1)": [
       { "title": "Hello World\tCtrl+F1", "script": "hello-world.js" },
@@ -19,11 +20,50 @@
           { "title": "Hello World", "script": "hello-world.py" }
         ]
       },
+      {
+        "title": "Command Line Tests",
+        "sub": [
+          {
+            "title": "Run Command with Output Pane",
+            "execute": {
+              "command": "cscript.exe //nologo \"{FILE_PATH}\" \"{FILE_NAME}\"",
+              "save_before_run": true,
+              "code_page": "ANSI",
+              "run_in": "output_pane",
+              "env": {
+                "NMS_FILE_NAME": "{FILE_NAME}",
+                "NMS_LINE_TEXT": "{LINE_TEXT}",
+                "NMS_SELECT_TEXT": "{SELECT_TEXT}"
+              }
+            }
+          },
+          {
+            "title": "Run Command in Console",
+            "execute": {
+              "command": "cscript.exe //nologo \"{FILE_PATH}\" \"{FILE_NAME}\"",
+              "save_before_run": true,
+              "code_page": "ANSI",
+              "run_in": "console",
+              "env": {
+                "NMS_FILE_NAME": "{FILE_NAME}",
+                "NMS_LINE_TEXT": "{LINE_TEXT}",
+                "NMS_SELECT_TEXT": "{SELECT_TEXT}"
+              }
+            }
+          },
+          {
+            "title": "Open Calculator",
+            "execute": {
+              "command": "calc.exe",
+              "run_in": "windows"
+            }
+          }
+        ]
+      },
       {},
-      { "title": "Run Current Script", "script": "{CURRENT_FILE}" }
+      { "title": "Run Current Script", "action": "{RUN_CURRENT_FILE}" }
     ]
   },
-  "icon_folder": "./icon",
   "toolbar": [
     {
       "icon": "hello.ico",
@@ -32,8 +72,13 @@
     },
     {
       "icon": "run.ico",
-      "script": "{CURRENT_FILE}",
+      "action": "{RUN_CURRENT_FILE}",
       "title": "Run Current Script"
+    },
+    {
+      "icon": "stop.ico",
+      "action": "{STOP_SCRIPT}",
+      "title": "Stop Script"
     }
   ]
 }

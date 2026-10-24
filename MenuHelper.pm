@@ -6,8 +6,8 @@ use Encode qw(encode decode FB_DEFAULT);
 use IO::Handle;
 use MIME::Base64 qw(encode_base64 decode_base64);
 
-our $VERSION = '9';
-my $HELPER_API_ID = '9';
+our $VERSION = '10';
+my $HELPER_API_ID = '10';
 my $HELPER_API_CHECK_PREFIX = "\x1eNPPMENUSCRIPTS_HELPER_API:";
 
 binmode STDIN, ':raw';
@@ -82,15 +82,20 @@ sub _default_title {
 }
 
 sub alert {
-    my ($self, $message, $title) = @_;
-    _request($self, "\x1eNPPMENUSCRIPTS_ALERT:", _base64($message) . '|' . _base64(defined($title) ? $title : _default_title()));
+    my ($self, $message, $title, $icon) = @_;
+    _request($self, "\x1eNPPMENUSCRIPTS_ALERT:", join('|',
+        _base64($message),
+        _base64(defined($title) ? $title : _default_title()),
+        _base64(defined($icon) ? $icon : ''),
+    ));
     return;
 }
 
 sub prompt {
-    my ($self, $message, $default_value, $title) = @_;
-    my $payload = _base64($message) . '|' . _base64($default_value) . '|' .
-                  _base64(defined($title) ? $title : _default_title());
+    my ($self, $message, $default_value, $title, $icon) = @_;
+    my $payload = join('|', _base64($message), _base64($default_value),
+                  _base64(defined($title) ? $title : _default_title()),
+                  _base64(defined($icon) ? $icon : ''));
     my $response = _request($self, "\x1eNPPMENUSCRIPTS_PROMPT:", $payload);
     return undef if $response eq 'CANCEL';
     return _from_base64(substr($response, 3)) if index($response, 'OK:') == 0;
@@ -98,8 +103,10 @@ sub prompt {
 }
 
 sub confirm {
-    my ($self, $message, $title) = @_;
-    my $payload = _base64($message) . '|' . _base64(defined($title) ? $title : _default_title());
+    my ($self, $message, $title, $icon) = @_;
+    my $payload = join('|', _base64($message),
+                  _base64(defined($title) ? $title : _default_title()),
+                  _base64(defined($icon) ? $icon : ''));
     return _request($self, "\x1eNPPMENUSCRIPTS_CONFIRM:", $payload) eq 'OK' ? 1 : 0;
 }
 

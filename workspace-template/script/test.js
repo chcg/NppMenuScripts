@@ -17,12 +17,12 @@ console.log(npp.hasSelection()
   ? `Selected text: ${selection}`
   : 'No text is selected.');
 
-const name = npp.prompt('Enter your name:', 'JavaScript');
+const name = npp.prompt('Enter your name:', 'JavaScript', undefined, '?');
 if (name !== null) {
-  console.log(`Hello, ${name}!`);
-  if (npp.confirm('Set a message in the Notepad++ status bar?')) {
+  console.log(`Hello, ${name}!`,'i');
+  if (npp.confirm('Set a message in the Notepad++ status bar?', undefined, 'i')) {
     npp.setStatusBarText(`Hello, ${name}!`);
   }
 }
 
-npp.alert('JavaScript Helper API test completed.');
+npp.alert('JavaScript Helper API test completed.',undefined,'!');

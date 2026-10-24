@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 
 // Keep this synchronized with HELPER_API_ID in src/main.cpp.
-const HELPER_API_ID = '9';
+const HELPER_API_ID = '10';
 const HELPER_API_CHECK_PREFIX = '\x1eNPPMENUSCRIPTS_HELPER_API:';
 const ALERT_PREFIX = '\x1eNPPMENUSCRIPTS_ALERT:';
 const PROMPT_PREFIX = '\x1eNPPMENUSCRIPTS_PROMPT:';
@@ -184,35 +184,41 @@ function requestResponseSync(payload) {
   }
 }
 
-function writeAlert(message, title) {
+function writeAlert(message, title, icon) {
   const text = String(message ?? '');
-  const alertTitle = arguments.length >= 2 ? String(title ?? '') : getDefaultAlertTitle();
+  const alertTitle = title == null ? getDefaultAlertTitle() : String(title);
+  const iconName = arguments.length >= 3 ? String(icon ?? '') : '';
   const encodedMessage = Buffer.from(text, 'utf8').toString('base64');
   const encodedTitle = Buffer.from(alertTitle, 'utf8').toString('base64');
-  return requestResponse(`${ALERT_PREFIX}${encodedMessage}|${encodedTitle}\n`).then(() => undefined);
+  const encodedIcon = Buffer.from(iconName, 'utf8').toString('base64');
+  return requestResponse(`${ALERT_PREFIX}${encodedMessage}|${encodedTitle}|${encodedIcon}\n`).then(() => undefined);
 }
 
-function prompt(message, defaultValue, title) {
+function prompt(message, defaultValue, title, icon) {
   const text = String(message ?? '');
   const defaultText = arguments.length >= 2 ? String(defaultValue ?? '') : '';
-  const promptTitle = arguments.length >= 3 ? String(title ?? '') : getDefaultAlertTitle();
+  const promptTitle = title == null ? getDefaultAlertTitle() : String(title);
+  const iconName = arguments.length >= 4 ? String(icon ?? '') : '';
   const encodedMessage = Buffer.from(text, 'utf8').toString('base64');
   const encodedDefault = Buffer.from(defaultText, 'utf8').toString('base64');
   const encodedTitle = Buffer.from(promptTitle, 'utf8').toString('base64');
+  const encodedIcon = Buffer.from(iconName, 'utf8').toString('base64');
 
-  return requestResponse(`${PROMPT_PREFIX}${encodedMessage}|${encodedDefault}|${encodedTitle}\n`).then((line) => {
+  return requestResponse(`${PROMPT_PREFIX}${encodedMessage}|${encodedDefault}|${encodedTitle}|${encodedIcon}\n`).then((line) => {
     if (line === 'CANCEL') return null;
     if (line.startsWith('OK:')) return Buffer.from(line.slice(3), 'base64').toString('utf8');
     return line;
   });
 }
 
-function confirm(message, title) {
+function confirm(message, title, icon) {
   const text = String(message ?? '');
-  const confirmTitle = arguments.length >= 2 ? String(title ?? '') : getDefaultAlertTitle();
+  const confirmTitle = title == null ? getDefaultAlertTitle() : String(title);
+  const iconName = arguments.length >= 3 ? String(icon ?? '') : '';
   const encodedMessage = Buffer.from(text, 'utf8').toString('base64');
   const encodedTitle = Buffer.from(confirmTitle, 'utf8').toString('base64');
-  return requestResponse(`${CONFIRM_PREFIX}${encodedMessage}|${encodedTitle}\n`).then((line) => line === 'OK');
+  const encodedIcon = Buffer.from(iconName, 'utf8').toString('base64');
+  return requestResponse(`${CONFIRM_PREFIX}${encodedMessage}|${encodedTitle}|${encodedIcon}\n`).then((line) => line === 'OK');
 }
 
 function getFileName() {
@@ -327,33 +333,39 @@ function setOutputPaneTitle(text) {
   return requestResponse(`${SETOUTPUTPANETITLE_PREFIX}${encoded}\n`).then((line) => line === 'OK');
 }
 
-function syncAlert(message, title) {
+function syncAlert(message, title, icon) {
   const text = String(message ?? '');
-  const alertTitle = arguments.length >= 2 ? String(title ?? '') : getDefaultAlertTitle();
+  const alertTitle = title == null ? getDefaultAlertTitle() : String(title);
+  const iconName = arguments.length >= 3 ? String(icon ?? '') : '';
   const encodedMessage = Buffer.from(text, 'utf8').toString('base64');
   const encodedTitle = Buffer.from(alertTitle, 'utf8').toString('base64');
-  requestResponseSync(`${ALERT_PREFIX}${encodedMessage}|${encodedTitle}\n`);
+  const encodedIcon = Buffer.from(iconName, 'utf8').toString('base64');
+  requestResponseSync(`${ALERT_PREFIX}${encodedMessage}|${encodedTitle}|${encodedIcon}\n`);
 }
 
-function syncPrompt(message, defaultValue, title) {
+function syncPrompt(message, defaultValue, title, icon) {
   const text = String(message ?? '');
   const defaultText = arguments.length >= 2 ? String(defaultValue ?? '') : '';
-  const promptTitle = arguments.length >= 3 ? String(title ?? '') : getDefaultAlertTitle();
+  const promptTitle = title == null ? getDefaultAlertTitle() : String(title);
+  const iconName = arguments.length >= 4 ? String(icon ?? '') : '';
   const encodedMessage = Buffer.from(text, 'utf8').toString('base64');
   const encodedDefault = Buffer.from(defaultText, 'utf8').toString('base64');
   const encodedTitle = Buffer.from(promptTitle, 'utf8').toString('base64');
-  const line = requestResponseSync(`${PROMPT_PREFIX}${encodedMessage}|${encodedDefault}|${encodedTitle}\n`);
+  const encodedIcon = Buffer.from(iconName, 'utf8').toString('base64');
+  const line = requestResponseSync(`${PROMPT_PREFIX}${encodedMessage}|${encodedDefault}|${encodedTitle}|${encodedIcon}\n`);
   if (line === 'CANCEL') return null;
   if (line.startsWith('OK:')) return Buffer.from(line.slice(3), 'base64').toString('utf8');
   return line;
 }
 
-function syncConfirm(message, title) {
+function syncConfirm(message, title, icon) {
   const text = String(message ?? '');
-  const confirmTitle = arguments.length >= 2 ? String(title ?? '') : getDefaultAlertTitle();
+  const confirmTitle = title == null ? getDefaultAlertTitle() : String(title);
+  const iconName = arguments.length >= 3 ? String(icon ?? '') : '';
   const encodedMessage = Buffer.from(text, 'utf8').toString('base64');
   const encodedTitle = Buffer.from(confirmTitle, 'utf8').toString('base64');
-  return requestResponseSync(`${CONFIRM_PREFIX}${encodedMessage}|${encodedTitle}\n`) === 'OK';
+  const encodedIcon = Buffer.from(iconName, 'utf8').toString('base64');
+  return requestResponseSync(`${CONFIRM_PREFIX}${encodedMessage}|${encodedTitle}|${encodedIcon}\n`) === 'OK';
 }
 
 function syncGetFileName() {
