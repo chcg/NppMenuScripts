@@ -59,12 +59,26 @@ jobs:
            .\build-x64.bat
            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    - name: zip artifacts for ${{ matrix.msys }} / ${{ matrix.configuration }}
+    - name: Package versioned artifact for ${{ matrix.msys }} / ${{ matrix.configuration }}
+      id: package
       run: |
-           7z a ${{ env.Projectname }}_${{ matrix.arch }}_${{ matrix.configuration }}.zip .\build\${{ env.Projectname }}.dll
+           $header = Get-Content src/version.h -Raw
+           if ($header -notmatch '(?m)^#define NPP_MENUSCRIPTS_VERSION_MAJOR (\d+)\s*$') { throw 'Could not read the plugin major version.' }
+           $major = $Matches[1]
+           if ($header -notmatch '(?m)^#define NPP_MENUSCRIPTS_VERSION_MINOR (\d+)\s*$') { throw 'Could not read the plugin minor version.' }
+           $minor = $Matches[1]
+           if ($header -notmatch '(?m)^#define NPP_MENUSCRIPTS_VERSION_PATCH (\d+)\s*$') { throw 'Could not read the plugin patch version.' }
+           $patch = $Matches[1]
+           if ($header -notmatch '(?m)^#define NPP_MENUSCRIPTS_VERSION_BUILD (\d+)\s*$') { throw 'Could not read the plugin build version.' }
+           $build = $Matches[1]
+           $version = "$major.$minor.$patch.$build"
+           $zipName = "${{ env.Projectname }}-$version-x64-${{ matrix.configuration }}.zip"
+           7z a $zipName .\build\${{ env.Projectname }}.dll
+           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+           "zip_name=$zipName" >> $Env:GITHUB_OUTPUT
 
     - name: Archive artifacts for Release ${{ matrix.arch }}
       uses: actions/upload-artifact@v7
       with:
-        name: ${{ env.Projectname }}_${{ matrix.arch }}_${{ matrix.configuration }}.zip
-        path: ${{ env.Projectname }}_${{ matrix.arch }}_${{ matrix.configuration }}.zip
+        name: ${{ steps.package.outputs.zip_name }}
+        path: ${{ steps.package.outputs.zip_name }}
